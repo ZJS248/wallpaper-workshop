@@ -11,8 +11,9 @@
     "selftest": "node scripts/selftest.js",
     "verify": "bash scripts/verify.sh",
     "electron": "electron .",
-    "dist": "electron-builder --win",
-    "dist:dir": "electron-builder --win --dir"
+    "dist": "node scripts/build.js --win",
+    "dist:dir": "node scripts/build.js --win --dir",
+    "dist:offline": "node scripts/build.js --win -c.electronDist=node_modules/electron/dist"
   },
   "build": {
     "appId": "com.zjs248.wallpaperworkshop",
