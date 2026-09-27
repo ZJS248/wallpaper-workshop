@@ -542,8 +542,9 @@ async function apiDeps(url) {
   const parent = dependencies.readDependency(cfg.wsDir, id) || '';
   const dependents = dependencies.dependentList(index, id);
   const chain = dependencies.dependencyChain(cfg.wsDir, id);
-  // 标题：复用已订阅列表的元数据缓存（点一下依赖警告不该再打一次 Steam）
-  const map = await loadSubscribedMeta(cfg.wsDir, ids.concat(chain));
+  // 标题：只查要显示的那几个（本地 180 个项目全查一遍要 3~4 秒，点个退订等不起）
+  const want = dependents.concat(chain);
+  const map = await loadSubscribedMeta(cfg.wsDir, want);
   const brief = (x) => ({ id: x, title: (map.get(String(x)) || {}).title || '', installed: ids.indexOf(String(x)) >= 0 });
   return {
     ok: true,
@@ -596,13 +597,17 @@ const SUB_META_TTL_MS = 5 * 60 * 1000;
 let subMetaCache = { at: 0, wsDir: '', map: null };
 
 async function loadSubscribedMeta(wsDir, ids) {
-  if (subMetaCache.map && subMetaCache.wsDir === wsDir && Date.now() - subMetaCache.at < SUB_META_TTL_MS) {
-    return subMetaCache.map;
-  }
+  const want = (ids || []).map((x) => String(x));
+  const usable =
+    subMetaCache.map && subMetaCache.wsDir === wsDir && Date.now() - subMetaCache.at < SUB_META_TTL_MS;
+  const map = usable ? subMetaCache.map : new Map();
+  // 只补"缓存里还没有"的那几个：/api/deps 可能先只查了 2 个 id，
+  // 不能因此让「已订阅」列表 5 分钟内都拿不到标题/大小
+  const missing = want.filter((id) => !map.has(id));
+  if (!missing.length) return map;
   const ctx = session.currentContext();
-  const map = new Map();
-  for (let i = 0; i < ids.length; i += 100) {
-    const chunk = ids.slice(i, i + 100);
+  for (let i = 0; i < missing.length; i += 100) {
+    const chunk = missing.slice(i, i + 100);
     try {
       const r = await steamApi.getDetails(chunk, ctx);
       (r.items || []).forEach((it) => map.set(String(it.id), it));
