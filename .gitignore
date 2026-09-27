@@ -1,0 +1,14 @@
+# 依赖与打包产物
+node_modules/
+dist/
+
+# 本项目的构建缓存（electron 二进制 / electron-builder 下载物）
+.cache/electron/
+.cache/electron-builder/
+
+# 自检产物（截图 / DOM 快照 / 日志）
+config/shots/
+config/*.log
+
+# 本机配置（含 Steam Cookie / API key，绝不入库）
+config/settings.json

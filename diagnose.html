@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>诊断页</title>
+<!--
+  诊断页：与 index.html 加载同一批脚本，但先装好错误钩子，
+  并把结果写进 <pre id="diag">，便于用无头 Chrome --dump-dom 读出来。
+  这是排查"页面白屏 / Vue 没挂载"用的，不参与正常运行。
+-->
+<script>
+window.__diag = [];
+window.addEventListener('error', function (e) {
+  // 资源加载失败（img/script/link）也会冒泡到这里，此时 e.message 为空。
+  // 只记真正的 JS 运行时错误，避免被几十条图片 404 噪声淹没。
+  if (!e.message) return;
+  window.__diag.push('ERROR: ' + e.message + ' @ ' + String(e.filename || '').split('/').pop() + ':' + (e.lineno || 0));
+  flush();
+}, true);
+window.addEventListener('unhandledrejection', function (e) {
+  var r = e && e.reason;
+  window.__diag.push('REJECTION: ' + ((r && (r.message || r)) || ''));
+  flush();
+});
+var _ce = console.error;
+console.error = function () {
+  window.__diag.push('CONSOLE.ERROR: ' + Array.prototype.slice.call(arguments).join(' '));
+  flush();
+  return _ce.apply(console, arguments);
+};
+var _cw = console.warn;
+console.warn = function () {
+  window.__diag.push('CONSOLE.WARN: ' + Array.prototype.slice.call(arguments).join(' '));
+  flush();
+  return _cw.apply(console, arguments);
+};
+function flush() {
+  var el = document.getElementById('diag');
+  if (el) el.textContent = window.__diag.join('\n');
+}
+</script>
+<link rel="stylesheet" href="/src/app.css">
+</head>
+<body>
+<div id="app" v-cloak>
+  <header class="topbar"><div class="brand"><span class="brand-text">诊断</span></div></header>
+  <main class="layout">
+    <filter-panel :meta="meta" :value="filters" @input="onFilterInput" @reset="resetFilters"></filter-panel>
+    <section class="content">
+      <div class="grid" ref="gridScroll">
+        <wp-card v-for="it in displayItems" :key="it.id" :item="it" @pick="selectItem"></wp-card>
+      </div>
+      <div class="pager">卡片数占位</div>
+    </section>
+    <detail-pane :detail="detail" :loading="detailLoading" :error="detailError"></detail-pane>
+  </main>
+</div>
+
+<!-- 诊断输出 -->
+<pre id="diag" style="position:fixed;inset:auto 0 0 0;max-height:46vh;overflow:auto;background:#000;color:#0f0;font:11px/1.5 monospace;z-index:999;margin:0;padding:6px"></pre>
+<pre id="diag2" style="position:fixed;top:0;right:0;width:520px;max-height:52vh;overflow:auto;background:#001;color:#0ff;font:11px/1.5 monospace;z-index:999;margin:0;padding:6px"></pre>
+
+<script defer src="/public/vendor/vue.min.js"></script>
+<script defer src="/src/util.js"></script>
+<script defer src="/src/api.js"></script>
+<script defer src="/src/components/wp-card.js"></script>
+<script defer src="/src/components/filter-panel.js"></script>
+<script defer src="/src/components/detail-pane.js"></script>
+<script defer src="/src/app.js"></script>
+<script defer>
+// 等 app.js 跑完后做一次快照
+setTimeout(function () {
+  var lines = [];
+  lines.push('Vue: ' + (window.Vue ? window.Vue.version : 'undefined'));
+  lines.push('注册的组件: ' + (window.Vue ? Object.keys(window.Vue.options.components || {}).join(', ') : '-'));
+  var app = document.getElementById('app');
+  lines.push('#app 存在: ' + !!app + '  v-cloak: ' + (app ? app.hasAttribute('v-cloak') : '-'));
+  lines.push('卡片数: ' + document.querySelectorAll('.card').length);
+  lines.push('筛选器分组: ' + document.querySelectorAll('.fgroup').length);
+  lines.push('代理图片数: ' + document.querySelectorAll('img[src^="/img"]').length);
+  var banner = document.querySelector('.banner.error');
+  lines.push('错误横幅: ' + (banner ? banner.textContent.trim().slice(0, 300) : '无'));
+  var toast = document.querySelector('.toast');
+  lines.push('toast: ' + (toast ? toast.textContent.trim() : '无'));
+  lines.push('scope 上的 items 长度: ' + (app && app.__vue__ ? (app.__vue__.items || []).length : '无法读取'));
+  lines.push('scope 上的 error: ' + (app && app.__vue__ ? app.__vue__.error : '无法读取'));
+  lines.push('scope 上的 totalCount: ' + (app && app.__vue__ ? app.__vue__.totalCount : '无法读取'));
+  lines.push('scope 上的 meta: ' + (app && app.__vue__ ? (app.__vue__.meta ? '有(' + (app.__vue__.meta.tags || []).length + ' 标签)' : 'null') : '-'));
+  document.getElementById('diag2').textContent = lines.join('\n');
+  document.title = 'DIAG_DONE';
+}, 12000);
+</script>
+</body>
+</html>

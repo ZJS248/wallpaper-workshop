@@ -1,0 +1,67 @@
+{
+  "name": "wallpaper-workshop",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Wallpaper Engine 创意工坊（网页版）：浏览 / 搜索 / 筛选 / 排序 / 订阅 / 收藏，可独立运行，也可作为子应用接入 wallpaper-manager",
+  "type": "commonjs",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "selftest": "node scripts/selftest.js",
+    "verify": "bash scripts/verify.sh",
+    "electron": "electron .",
+    "dist": "electron-builder --win",
+    "dist:dir": "electron-builder --win --dir"
+  },
+  "build": {
+    "appId": "com.zjs248.wallpaperworkshop",
+    "productName": "WallpaperWorkshop",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "electron/**",
+      "server.js",
+      "server/**",
+      "src/**",
+      "public/**",
+      "index.html",
+      "package.json",
+      "!scripts/**",
+      "!config/**",
+      "!**/*.md"
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "icon": "electron/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "创意工坊"
+    }
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "wallpaper-engine",
+    "steam-workshop",
+    "steam",
+    "431960"
+  ],
+  "license": "MIT",
+  "author": "ZJS248",
+  "dependencies": {},
+  "devDependencies": {
+    "electron": "^26.3.0",
+    "electron-builder": "^25.1.8"
+  }
+}

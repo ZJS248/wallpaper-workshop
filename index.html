@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wallpaper Engine 创意工坊 · wallpaper-workshop</title>
+<link rel="stylesheet" href="/src/app.css">
+</head>
+<body>
+
+<div id="app" v-cloak>
+  <!-- ============================ 顶栏 ============================ -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-ico">🖼</span>
+      <span class="brand-text">Wallpaper Engine</span>
+      <span class="brand-tag">创意工坊 · 网页版</span>
+    </div>
+
+    <nav class="tabs">
+      <button class="tab" :class="{ on: mode === 'browse' }" @click="backToBrowse">创意工坊</button>
+      <button class="tab" v-if="mode === 'author'" class="on" @click="backToBrowse">作者作品</button>
+      <button class="tab" :class="{ on: mode === 'subscribed' }" @click="openSubscribed">已订阅</button>
+    </nav>
+
+    <div class="topbar-right">
+      <span class="conn" :class="loginState === 'ok' ? 'ok' : (loginState === 'invalid' ? 'warn' : 'off')"
+            :title="loginTitle">
+        <span class="dot"></span>{{ loginText }}
+      </span>
+      <span class="conn" :class="status && status.dns && status.dns.poisoned ? 'warn' : 'ok'"
+            :title="'出口：' + ((status && status.proxy) || '直连') + '　DoH：' + ((status && status.dns && status.dns.doh) || []).join(', ')">
+        <span class="dot"></span>{{ status && status.proxy ? '代理' : '直连' }}
+      </span>
+      <button class="icon-btn" title="设置 / 登录" @click="settingsOpen = true">⚙</button>
+    </div>
+  </header>
+
+  <!-- ==================== 搜索 + 排序 工具条 ==================== -->
+  <!-- 工具条属于「创意工坊」浏览视图；已订阅视图有自己的搜索/排序条 -->
+  <div class="toolbar" v-if="mode !== 'subscribed'">
+    <div class="search">
+      <span class="search-ico">🔍</span>
+      <input v-model="searchInput" type="text" placeholder="搜索创意工坊（标题 / 描述）"
+             @input="onSearchInput" @keyup.enter="submitSearch">
+      <button v-if="filters.search" class="search-clear" @click="clearSearch" title="清除搜索">✕</button>
+      <button class="search-go" @click="submitSearch">搜索</button>
+    </div>
+
+    <div class="toolbar-mid">
+      <span class="filter-badge" v-if="hasAnyFilter" @click="resetFilters" title="点击重置全部筛选">
+        筛选结果（已筛选） ✕
+      </span>
+      <span class="count" v-if="totalCount" :class="{ 'count-note': !!countNote }" :title="countNote">
+        共 {{ fmtCount(totalCount) }}{{ totalCountApprox ? '（约）' : '' }} 个作品
+      </span>
+      <span class="merge-note" v-if="mergeInfo" :title="mergeInfo.title">{{ mergeInfo.text }}</span>
+      <span class="merge-note" v-if="subsError" :title="subsError" style="color:var(--warn)">Steam 订阅列表取不到（登录态过期？），角标已改用本地库</span>
+    </div>
+
+    <div class="toolbar-right">
+      <select class="sel" :value="filters.sort" @change="onSortChange" :title="sortHint">
+        <option v-for="s in sortOptions" :key="s.key" :value="s.key">{{ s.label }}</option>
+      </select>
+      <!-- 「最热门」的时间窗：今日 / 本周 / 本月 / 本年（对齐 WE 客户端） -->
+      <select class="sel" v-if="filters.sort === 'trend'" :value="filters.days" @change="onDaysChange"
+              title="「最热门」的时间范围">
+        <option v-for="d in daysOptions" :key="d.value" :value="d.value">{{ d.label }}</option>
+      </select>
+      <!-- 上游固定 30 条/页，60 / 100 由后端拼多个上游页实现 -->
+      <select class="sel" :value="filters.pageSize" @change="onPageSizeChange" title="每页显示多少条">
+        <option v-for="s in pageSizeOptions" :key="s" :value="s">{{ s }} / 页</option>
+      </select>
+      <label class="chk" :class="{ on: filters.hideMature }" @click.prevent="toggleMature"
+             title="Wallpaper Engine 客户端默认不展示成人内容，这里对齐。取消勾选即可看到全部">
+        <input type="checkbox" :checked="filters.hideMature">
+        <span class="box"></span>隐藏 18+
+      </label>
+    </div>
+  </div>
+
+  <!-- ==================== 作者视图的返回条 ==================== -->
+  <!-- 注意：加载中不要显示总数（否则会闪出上一次列表的旧数字），所以要求 totalCount 已就绪 -->
+  <div class="authorbar" v-if="mode === 'author' && authorView">
+    <img v-if="authorView.avatar" class="avatar sm" :src="imgSrc(authorView.avatar)" alt="">
+    <span>正在查看作者 <b>{{ authorView.name || authorView.steamId }}</b> 的全部作品</span>
+    <span class="dim" v-if="loading">加载中…</span>
+    <span class="dim" v-else>共 {{ fmtCount(totalCount) }} 个</span>
+    <a :href="'https://steamcommunity.com/profiles/' + authorView.steamId + '/myworkshopfiles/?appid=431960'"
+       target="_blank" rel="noopener">在 Steam 中查看 ↗</a>
+    <button class="fbtn sm" @click="backToBrowse">← 返回创意工坊</button>
+  </div>
+
+  <!-- ============================ 主体 ============================ -->
+  <!--
+    布局：未选中作品时网格占满宽度；选中后才从右侧滑出详情面板（覆盖在网格之上），
+    与 WE 客户端的行为一致 —— 好处是浏览时每行能多放一张，网格不会被裁掉。
+  -->
+  <main class="layout" :class="{ 'has-detail': !!selected, 'no-filters': mode === 'subscribed' }">
+    <filter-panel v-if="mode !== 'subscribed'" :meta="meta" :value="filters" :loading="loading"
+                  @input="onFilterInput" @reset="resetFilters"></filter-panel>
+
+    <section class="content" v-if="mode !== 'subscribed'">
+      <!--
+        错误横幅：**不再清空网格**。上游一抖就把整页内容抹掉会让用户丢掉上下文
+        （测试报告 BUG-08），所以改成"保留上一次结果 + 顶部一条横幅 + 自动重试"。
+      -->
+      <div v-if="error" class="banner error">
+        <b>加载失败：</b>{{ error }}
+        <span class="dim" v-if="items.length">（下面仍然是第 {{ staleFrom }} 页的旧数据）</span>
+        <span class="dim" v-else-if="retryCount < 2">正在自动重试…</span>
+        <button class="fbtn sm" @click="retryNow">立即重试</button>
+      </div>
+
+      <!-- 多词搜索的宽松匹配提示（BUG-09：搜不存在的长串却回来 23 万条） -->
+      <div v-if="searchNote && !dismissedNotes.search" class="notebar">
+        {{ searchNote }}
+        <button class="nb-close" @click="dismissNote('search')">知道了 ✕</button>
+      </div>
+
+      <!-- 深翻页上限说明（BUG-16） -->
+      <div v-if="pageCapNote && !dismissedNotes.cap" class="notebar">
+        {{ pageCapNote }}
+        <button class="nb-close" @click="dismissNote('cap')">知道了 ✕</button>
+      </div>
+
+      <div v-if="loading && !items.length" class="grid">
+        <div v-for="n in 8" :key="n" class="skeleton"></div>
+      </div>
+
+      <!-- 上游慢的时候别让人对着骨架屏干等：给一句提示 + 一个取消按钮 -->
+      <div v-if="slowHint" class="notebar warn">
+        {{ slowHint }}
+        <button class="nb-close" @click="cancelLoad">取消这次加载</button>
+      </div>
+
+      <div v-else-if="!visibleItems.length" class="empty">
+        <div class="empty-ico">🗂</div>
+        <div v-if="mode === 'author'">该作者没有公开的创意工坊作品</div>
+        <div v-else>没有符合条件的作品</div>
+        <div class="empty-sub" v-if="mode === 'author'">（Steam 上该作者的"创意工坊物品"是空的）</div>
+        <div class="empty-sub" v-if="blockedOnPage">本页 {{ blockedOnPage }} 个作品来自你屏蔽的作者</div>
+        <div class="empty-sub" v-else-if="mode !== 'author'">试试减少标签，或点「重置过滤器」</div>
+        <button class="fbtn" v-if="blockedOnPage" @click="clearBlockedCreators">清空屏蔽名单</button>
+        <button class="fbtn" v-if="mode === 'author'" @click="backToBrowse">← 返回创意工坊</button>
+        <button class="fbtn" v-else @click="resetFilters">重置过滤器</button>
+      </div>
+
+      <template v-else>
+        <!-- 已选 / 已排除标签 -->
+        <div class="active-chips" v-if="activeTagChips.length || filters.exclude.length || filters.hideMature || blockedCreators.length">
+          <!--
+            标签条默认只铺前几个：整组全选（例如把 25 个标签都勾上）时
+            原来的写法会把 25 个 chip 全摊在工具条上，把查询条件撑成一大片。
+          -->
+          <!--
+            按类目分组显示。语义是「同类目内满足任一、跨类目同时满足」，
+            所以不能笼统写成"满足任一（42）"—— 42 个里跨类目其实是 AND。
+          -->
+          <template v-for="(g, gi) in visibleChipGroups">
+            <span class="chips-label" :key="'l' + gi">{{ g.label }}：</span>
+            <span v-if="g.full" :key="'f' + gi" class="chip ex fixed"
+                  title="这一类全选在语义上等于不筛（每张作品都属于其中之一），点击清空"
+                  @click="clearGroup(g.key)">全选（不筛） ✕</span>
+            <span class="chip on" v-for="t in g.tags" :key="g.key + '|' + t"
+                  @click="removeTagIn(g.key, t)">{{ tagLabel(t) }} ✕</span>
+          </template>
+          <a v-if="hiddenChipCount" class="chips-toggle" @click="chipsExpanded = true">
+            …还有 {{ hiddenChipCount }} 个
+          </a>
+          <a v-else-if="effectiveChipCount > 6" class="chips-toggle" @click="chipsExpanded = false">收起</a>
+          <a v-if="chipGroups.length" class="chips-toggle" @click="clearTagChips" title="清空所有已选标签">清空标签</a>
+          <span v-if="blockedCreators.length" class="chip ex fixed"
+                title="右键菜单 → 报告和阻止 → 屏蔽该作者（只在本机生效），点这里清空"
+                @click="clearBlockedCreators">
+            已屏蔽 {{ blockedCreators.length }} 位作者<span v-if="blockedOnPage">（本页隐藏 {{ blockedOnPage }} 个）</span> ✕
+          </span>
+          <span class="chip ex fixed" v-if="filters.hideMature" @click="toggleMature"
+                title="由工具条的「隐藏 18+」开关加上的，点击即可显示成人内容">隐藏：18+ ✕</span>
+          <span class="chip ex" v-for="t in filters.exclude" :key="'e' + t"
+                @click="removeExclude(t)">排除：{{ tagLabel(t) }} ✕</span>
+        </div>
+
+        <div class="grid" :class="{ dim: loading }" ref="gridScroll">
+          <wp-card v-for="it in visibleItems" :key="it.id" :item="it"
+                   :active="!!(selected && selected.id === it.id)"
+                   :subscribed="isSubscribedId(it.id)"
+                   :favorited="!!favoriteIds[it.id]"
+                   :busy="!!busyIds[it.id]"
+                   :size="fileSizes[it.id] || 0"
+                   :current="isCurrentWallpaper(it.id)"
+                   :can-apply="canApplyId(it.id)"
+                   @pick="selectItem"
+                   @menu="openCardMenu"
+                   @apply="applyWallpaper"
+                   @subscribe="doSubscribe"
+                   @favorite="doFavorite"></wp-card>
+        </div>
+
+        <div class="pager">
+          <button class="pg" :disabled="page <= 1" @click="prevPage">‹</button>
+          <button v-for="(p, i) in pageButtons" :key="i" class="pg"
+                  :class="{ on: p === page, dots: p === '…' }"
+                  :disabled="p === '…'" @click="goPage(p)">{{ p }}</button>
+          <button class="pg" :disabled="page >= totalPages" @click="nextPage">›</button>
+          <span class="pg-info" v-if="totalPages">第 {{ page }} / {{ Math.min(totalPages, 1000) }} 页</span>
+        </div>
+      </template>
+    </section>
+
+    <!-- ==================== 已订阅（本地库口径：订阅时间 / 搜索 / 排序 / 设为使用中） ==================== -->
+    <section class="content" v-else>
+      <div class="subs-bar">
+        <div class="subs-search">
+          <span class="search-ico">🔍</span>
+          <input type="text" v-model="subsSearchInput" placeholder="在已订阅里搜索标题 / 作者"
+                 @input="onSubsSearchInput" @keyup.enter="loadSubscribed">
+          <button v-if="subs.search" class="search-clear" @click="clearSubsSearch" title="清除搜索">✕</button>
+        </div>
+        <select class="sel" :value="subs.sort" @change="onSubsSortChange" title="排序方式">
+          <option value="time_desc">订阅时间：新 → 旧</option>
+          <option value="time_asc">订阅时间：旧 → 新</option>
+          <option value="title">名称</option>
+        </select>
+        <span class="count">共 {{ subs.totalCount }} 个已订阅</span>
+        <button class="fbtn sm" :disabled="subs.loading" @click="loadSubscribed">
+          {{ subs.loading ? '读取中…' : '刷新' }}
+        </button>
+        <span class="dim subs-src" :title="subs.wsDir || ''">数据来自本地创意工坊库（不用登录）</span>
+      </div>
+
+      <div v-if="subs.error" class="banner error">
+        <b>加载失败：</b>{{ subs.error }}
+        <button class="fbtn sm" @click="loadSubscribed">立即重试</button>
+      </div>
+
+      <div v-if="subs.loading && !subs.items.length" class="grid">
+        <div v-for="n in 8" :key="n" class="skeleton"></div>
+      </div>
+
+      <div v-else-if="!subs.items.length" class="empty">
+        <div class="empty-ico">📥</div>
+        <div>{{ subs.search ? '没有匹配的已订阅项目' : '还没有已下载的订阅项目' }}</div>
+        <div class="empty-sub">订阅并下载完成的壁纸会自动出现在这里；订阅时间取项目文件夹的创建时间</div>
+        <button class="fbtn" @click="clearSubsSearch" v-if="subs.search">清除搜索</button>
+        <button class="fbtn" @click="backToBrowse">← 去创意工坊逛逛</button>
+      </div>
+
+      <template v-else>
+        <div class="grid" :class="{ dim: subs.loading }">
+          <wp-card v-for="it in subs.items" :key="'sub' + it.id" :item="it"
+                   :active="!!(selected && selected.id === it.id)"
+                   :subscribed="true"
+                   :favorited="!!favoriteIds[it.id]"
+                   :busy="!!busyIds[it.id]"
+                   :size="it.fileSize || 0"
+                   :current="isCurrentWallpaper(it.id)"
+                   :can-apply="true"
+                   :note="shortDate(it.subscribedAt)"
+                   @pick="selectItem"
+                   @menu="openCardMenu"
+                   @apply="applyWallpaper"
+                   @subscribe="doSubscribe"
+                   @favorite="doFavorite"></wp-card>
+        </div>
+
+        <div class="pager">
+          <button class="pg" :disabled="subs.page <= 1" @click="subsGoPage(subs.page - 1)">‹</button>
+          <button v-for="(p, i) in subsPageButtons" :key="i" class="pg"
+                  :class="{ on: p === subs.page, dots: p === '…' }"
+                  :disabled="p === '…'" @click="subsGoPage(p)">{{ p }}</button>
+          <button class="pg" :disabled="subs.page >= subs.totalPages" @click="subsGoPage(subs.page + 1)">›</button>
+          <span class="pg-info">第 {{ subs.page }} / {{ subs.totalPages }} 页</span>
+        </div>
+      </template>
+    </section>
+
+    <detail-pane :detail="detail" :loading="detailLoading" :error="detailError"
+                 :not-found="detailNotFound"
+                 :related="related" :related-loading="relatedLoading" :related-error="relatedError"
+                 :busy="!!(selected && busyIds[selected.id])"
+                 :subscribed="isSubscribedId(selected && selected.id)"
+                 :favorited="!!(selected && favoriteIds[selected.id])"
+                 :current="!!(selected && isCurrentWallpaper(selected.id))"
+                 :can-apply="canApplyId(selected && selected.id)"
+                 :embedded="host.embedded"
+                 @subscribe="doSubscribe" @favorite="doFavorite" @vote="doVote"
+                 @author="gotoAuthor" @pick="selectItem" @tag="onTagClick"
+                 @menu="openCardMenu"
+                 @copy="copyLink"
+                 @apply="applyWallpaper"
+                 @reload="reloadDetail"
+                 @close="selected = null; detail = null; related = null"></detail-pane>
+  </main>
+
+    <!-- ============================ 抽屉 ============================ -->
+    <settings-drawer :open="settingsOpen" :status="status" :session="session" :host="host"
+                     @close="settingsOpen = false" @changed="onSessionChanged"></settings-drawer>
+
+    <!-- ============================ 卡片右键菜单 ============================ -->
+    <context-menu :open="menu.open" :x="menu.x" :y="menu.y" :item="menu.item"
+                  :subscribed="isSubscribedId(menu.item && menu.item.id)"
+                  :favorited="!!(menu.item && favoriteIds[menu.item.id])"
+                  :current="!!(menu.item && isCurrentWallpaper(menu.item.id))"
+                  :can-apply="canApplyId(menu.item && menu.item.id)"
+                  :busy="!!(menu.item && busyIds[menu.item.id])"
+                  :creator-blocked="!!(menu.item && blockedIds[menu.item.creator])"
+                  @action="onMenuAction" @close="closeCardMenu"></context-menu>
+
+    <!-- ============================ 提示 ============================ -->
+  <transition name="toast">
+    <div v-if="toast" class="toast" :class="toast.type">{{ toast.text }}</div>
+  </transition>
+</div>
+
+<!--
+  依赖顺序（都用 defer，保证 DOM 解析完、且按顺序执行）：
+    vendor(Vue) → util/api → 组件 → app
+  注意一定要 defer：脚本在 <body> 末尾同步执行时，app.js 里的 new Vue({el:'#app'})
+  会在后面的 <script> 之前就跑起来，导致组件（如 wp-card）还没注册就被模板引用。
+-->
+<script defer src="/public/vendor/vue.min.js"></script>
+<script defer src="/src/util.js"></script>
+<script defer src="/src/api.js"></script>
+<script defer src="/src/host-bridge.js"></script>
+<script defer src="/src/components/wp-card.js"></script>
+<script defer src="/src/components/filter-panel.js"></script>
+<script defer src="/src/components/detail-pane.js"></script>
+<script defer src="/src/components/context-menu.js"></script>
+<script defer src="/src/components/settings-drawer.js"></script>
+<script defer src="/src/app.js"></script>
+</body>
+</html>

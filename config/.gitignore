@@ -1,0 +1,4 @@
+# 自检产物（截图 / DOM 快照 / 诊断输出）不入库
+shots/
+debug-*.html
+*.log
