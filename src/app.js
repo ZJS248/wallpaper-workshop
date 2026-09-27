@@ -581,10 +581,6 @@ new Vue({
     window.removeEventListener('message', this.onHostMessage);
     if (this._weTimer) clearInterval(this._weTimer);
     if (this._tickTimer) clearInterval(this._tickTimer);
-    if (this._depTimers) {
-      Object.keys(this._depTimers).forEach((k) => clearTimeout(this._depTimers[k]));
-      this._depTimers = {};
-    }
   },
 
   methods: {
@@ -1493,55 +1489,18 @@ new Vue({
       const willSub = !this.isSubscribedId(id);
       this.markBusy(id, true);
       try {
-        /*
-         * 依赖关系（对齐 WE / wallpaper-manager 的语义）：
-         *   - 退订某张壁纸时，**依赖它的子孙会被一起退订**（Steam/WE 就是这么联动的）；
-         *   - 订阅某张壁纸时，它依赖的**父壁纸要一起订阅**，否则它加载不了。
-         * 依赖信息只有把项目下载到本地、读到 project.json 才知道，
-         * 所以订阅后前端会隔几秒问一次后端"这个项目依赖谁、要不要补订"。
-         */
-        let unsubDeps = [];
-        if (!willSub) {
-          try {
-            const dep = await api.deps(id);
-            if (dep && dep.dependents && dep.dependents.length) {
-              const lines = dep.dependents.slice(0, 8)
-                .map((d) => '· ' + (d.title || ('作品 ' + d.id)) + (d.installed ? '' : '（未下载）'))
-                .join('\n');
-              const more = dep.dependents.length > 8 ? '\n…共 ' + dep.dependents.length + ' 个' : '';
-              const ok = window.confirm(
-                '这张壁纸有 ' + dep.dependents.length + ' 个已订阅的壁纸依赖它：\n' + lines + more +
-                '\n\n取消订阅它会把这些一起取消（WE 的行为一致）。确定继续吗？'
-              );
-              if (!ok) return;
-              unsubDeps = dep.dependents.map((d) => String(d.id));
-            }
-          } catch (e) {
-            /* 拿不到依赖信息就按普通退订处理 */
-          }
-        }
-
-        const r = await api.subscribe(id, willSub ? 'sub' : 'unsub', { withDependents: unsubDeps.length > 0 });
+        const r = await api.subscribe(id, willSub ? 'sub' : 'unsub');
         if (r.ok) {
           const next = Object.assign({}, this.subscribedIds);
           if (willSub) next[id] = true;
-          else {
-            delete next[id];
-            (r.removed || []).forEach((x) => { delete next[String(x)]; });
-          }
+          else delete next[id];
           this.subscribedIds = next;
-          if (!willSub && (r.removed || []).length > 1) {
-            this.showToast('已取消订阅，并连同依赖它的 ' + ((r.removed || []).length - 1) + ' 个壁纸一起取消', 'ok');
-          } else {
-            this.showToast(willSub ? '已订阅（Steam 会开始下载）' : '已取消订阅', 'ok');
-          }
+          this.showToast(willSub ? '已订阅（Steam 会开始下载）' : '已取消订阅', 'ok');
           this.patchItemStat(id, 'subscriptions', willSub ? 1 : -1);
           // 订阅后 Steam 的"累计订阅"也会 +1
           if (willSub) this.patchItemStat(id, 'lifetimeSubscriptions', 1);
           notifyHost({ event: 'subscribe', id, subscribed: willSub });
-          // 订阅后补订父壁纸（项目下载完才有 dependency，所以轮询几次）
-          if (willSub) this.followupDeps(id);
-          // 已订阅视图开着的话，顺手刷新（退订连锁会让列表变化）
+          // 已订阅视图开着的话，顺手刷新
           if (this.mode === 'subscribed' && !willSub) this.loadSubscribed(true);
         } else {
           this.showToast(r.reason || '操作失败', 'error');
@@ -1556,43 +1515,6 @@ new Vue({
       } finally {
         this.markBusy(id, false);
       }
-    },
-
-    /**
-     * 订阅后的「依赖补订」。
-     *
-     * WE 里子壁纸的 project.json 有 dependency 字段指向父壁纸 id；订阅子壁纸时父壁纸也得订阅，
-     * 否则子壁纸加载不出来。但 dependency 要项目下载到本地才读得到，刚点完订阅时文件还没下来，
-     * 所以这里隔几秒问一次后端（最多 5 次），拿到父链就把还没订阅的父壁纸补订上。
-     * 依赖数据源与 wallpaper-manager 一致：本地 project.json（Steam 官方接口里没有）。
-     */
-    followupDeps(id) {
-      if (!id) return;
-      if (!this._depTimers) this._depTimers = {};
-      if (this._depTimers[id]) return; // 同一张壁纸不重复起轮询
-      let tries = 0;
-      const tick = async () => {
-        tries++;
-        try {
-          const r = await api.depsFollowup(id);
-          const added = (r && r.added) || [];
-          if (added.length) {
-            delete this._depTimers[id];
-            const total = ((r && r.dependencyChain) || []).length;
-            this.showToast('这张壁纸依赖 ' + total + ' 个作品，已一并订阅 ' + added.length + ' 个（Steam 会开始下载）', 'ok');
-            this.loadSubscribedIds();
-            return;
-          }
-          if (tries >= 5) {
-            delete this._depTimers[id];
-            return;
-          }
-          this._depTimers[id] = setTimeout(tick, 6000);
-        } catch (e) {
-          delete this._depTimers[id];
-        }
-      };
-      this._depTimers[id] = setTimeout(tick, 6000);
     },
 
     async doFavorite(item) {
