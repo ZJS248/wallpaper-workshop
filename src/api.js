@@ -152,6 +152,8 @@
       if (o.pageSize) sp.push('pageSize=' + o.pageSize);
       if (o.search) sp.push('search=' + encodeURIComponent(o.search));
       if (o.sort) sp.push('sort=' + encodeURIComponent(o.sort));
+      // fresh=1：绕过服务端缓存，重新读盘 + 重新拉 Steam 订阅列表（「刷新」按钮用）
+      if (o.fresh) sp.push('fresh=1');
       return request('/api/subscribed' + (sp.length ? '?' + sp.join('&') : ''));
     },
     author: function (id, page, pageSize, creator) {
@@ -170,8 +172,19 @@
       return request('/api/subscribed-ids');
     },
 
-    subscribe: function (id, action) {
-      return request('/api/item/subscribe', { method: 'POST', body: { id: id, action: action } });
+    /**
+     * 订阅 / 取消订阅。
+     * @param {string} id
+     * @param {'sub'|'unsub'} action
+     * @param {{withDependents?:boolean}} [opts]
+     *        退订时是否连同"依赖它的子孙"一起退订（WE / wallpaper-manager 的联动行为）。
+     *        订阅时不传：父链补订由 depsFollowup 在项目下载完成后处理。
+     */
+    subscribe: function (id, action, opts) {
+      return request('/api/item/subscribe', {
+        method: 'POST',
+        body: { id: id, action: action, withDependents: !!(opts && opts.withDependents) },
+      });
     },
     favorite: function (id, action) {
       return request('/api/item/favorite', { method: 'POST', body: { id: id, action: action } });
@@ -197,6 +210,14 @@
     },
     sessionEvents: function () {
       return request('/api/session/events');
+    },
+    /** 依赖关系：父链（dependency）+ 依赖它的子孙（dependents） */
+    deps: function (id) {
+      return request('/api/deps?id=' + encodeURIComponent(String(id)));
+    },
+    /** 订阅后的依赖补订（项目下载完才知道它依赖谁，所以前端隔几秒问一次） */
+    depsFollowup: function (id) {
+      return request('/api/item/deps-followup', { method: 'POST', body: { id: String(id) } });
     },
   };
 

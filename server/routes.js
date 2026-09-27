@@ -7,12 +7,14 @@
  *   GET  /api/filters                    筛选器元数据（排序项、标签分组、时间窗、每页档位）
  *   GET  /api/browse                     浏览/搜索/筛选/排序/分页（pageSize 30/60/100）
  *   GET  /api/item?id=                   作品详情（含作者昵称、星级评分、我是否已订阅/已收藏）
- *   POST /api/item/subscribe             订阅 / 取消订阅  { id, action: 'sub'|'unsub' }
+ *   POST /api/item/subscribe             订阅 / 取消订阅  { id, action: 'sub'|'unsub', withDependents? }
  *   POST /api/item/favorite              收藏 / 取消收藏  { id, action: 'fav'|'unfav' }
  *   POST /api/item/vote                  点赞 / 点踩    { id, action: 'up'|'down' }
  *   GET  /api/details?ids=a,b,c          批量补详情（公开 API，不需要登录）
  *   GET  /api/author?id=                 作者信息 + 该作者作品（相关壁纸）
  *   GET  /api/subscribed-ids             已订阅 id 集合（给卡片打角标，会翻完所有页）
+ *   GET  /api/deps?id=                   依赖关系（父链 + 依赖它的子孙；数据源 = 本地 project.json）
+ *   POST /api/item/deps-followup         订阅后补订父链  { id }
  *   GET  /api/we/state                   Wallpaper Engine 状态（安装目录 / 是否在跑 / 当前使用中的作品）
  *   POST /api/we/apply                   把某个作品设为桌面壁纸（WE 官方 CLI openWallpaper）
  *   GET  /api/session                    登录态
@@ -34,6 +36,7 @@ const session = require('./lib/session');
 const steamApi = require('./lib/steamApi');
 const steamWebApi = require('./lib/steamWebApi');
 const wallpaperEngine = require('./lib/wallpaperEngine');
+const dependencies = require('./lib/dependencies');
 const sc = require('./lib/steamCommunity');
 const { ok, fail, HttpError, clampInt, APP_ID } = require('./lib/util');
 
@@ -452,9 +455,43 @@ async function apiSubscribe(body) {
   if (!id) throw new HttpError('缺少 id', 400);
   const action = (body && body.action) || 'sub';
   const ctx = session.currentContext();
+
+  /*
+   * 取消订阅 + 依赖连锁：WE 里"父壁纸被退订，依赖它的子壁纸会被一起退订"
+   * （wallpaper-manager 的 collectDependents 就是这么做的：BFS 反查"谁依赖我"，含间接）。
+   * 顺序也照它：**先子孙、后父**。
+   */
+  if (action === 'unsub' && body && body.withDependents) {
+    const cfg = settings.getConfig();
+    const local = wallpaperEngine.listSubscribed(cfg.wsDir);
+    const index = dependencies.buildIndex(cfg.wsDir, local.map((x) => String(x.id)));
+    const dependents = dependencies.dependentList(index, id);
+    const removed = [];
+    const failed = [];
+    for (const did of dependents) {
+      const r = await steamApi.unsubscribe(String(did), ctx);
+      if (r && r.ok) { removed.push(String(did)); subsCachePatch(String(did), false); }
+      else failed.push({ id: String(did), reason: (r && r.reason) || '失败' });
+    }
+    const r0 = await steamApi.unsubscribe(id, ctx);
+    if (r0 && r0.ok) { removed.push(id); subsCachePatch(id, false); }
+    dependencies.clearCache(); // 项目文件夹会随退订消失，依赖索引立刻作废
+    session.logEvent('subscribe', id + ' unsub(+依赖 ' + dependents.length + ') -> ' + (r0 && r0.ok ? '成功' : '失败'));
+    return {
+      ok: !!(r0 && r0.ok),
+      reason: r0 && r0.ok ? '' : (r0 && r0.reason) || '取消订阅失败',
+      removed: removed,
+      failed: failed,
+      dependents: dependents,
+    };
+  }
+
   const res = action === 'unsub' ? await steamApi.unsubscribe(id, ctx) : await steamApi.subscribe(id, ctx);
   // 角标用的订阅集合缓存增量更新，不用等 5 分钟或下次全量刷新
-  if (res && res.ok) subsCachePatch(id, action !== 'unsub');
+  if (res && res.ok) {
+    subsCachePatch(id, action !== 'unsub');
+    dependencies.clearCache(); // 依赖索引按"本地有哪些项目"算，订阅状态变了就该重算
+  }
   session.logEvent('subscribe', id + ' ' + action + ' -> ' + (res.ok ? '成功' : res.reason));
   return res;
 }
@@ -488,6 +525,64 @@ async function apiDetails(url) {
 }
 
 /* ------------------------------ Wallpaper Engine 控制 ------------------------------ */
+
+/**
+ * 依赖关系（对齐 wallpaper-manager 的语义）：
+ *   向上 = 父链（project.json 的 dependency）→ 订阅时要一起订阅；
+ *   向下 = 依赖它的子孙（children 数组 + 反向 dependency，含间接）→ 退订时要一起退订。
+ * 依赖信息只能从**本地已下载**的 project.json 读，所以只对本地已有的项目有效。
+ */
+async function apiDeps(url) {
+  const cfg = settings.getConfig();
+  const id = String(url.searchParams.get('id') || '').replace(/[^0-9]/g, '');
+  if (!id) throw new HttpError('缺少 id', 400);
+  const local = wallpaperEngine.listSubscribed(cfg.wsDir);
+  const ids = local.map((x) => String(x.id));
+  const index = dependencies.buildIndex(cfg.wsDir, ids);
+  const parent = dependencies.readDependency(cfg.wsDir, id) || '';
+  const dependents = dependencies.dependentList(index, id);
+  const chain = dependencies.dependencyChain(cfg.wsDir, id);
+  // 标题：复用已订阅列表的元数据缓存（点一下依赖警告不该再打一次 Steam）
+  const map = await loadSubscribedMeta(cfg.wsDir, ids.concat(chain));
+  const brief = (x) => ({ id: x, title: (map.get(String(x)) || {}).title || '', installed: ids.indexOf(String(x)) >= 0 });
+  return {
+    ok: true,
+    id: id,
+    dependency: parent,
+    dependencyChain: chain,
+    dependencyBrief: chain.map(brief),
+    dependents: dependents.map(brief),
+    hasRelations: !!(parent || dependents.length),
+  };
+}
+
+/**
+ * 订阅后的"依赖补订"：项目刚订阅时文件还没下来，读不到 dependency，
+ * 所以前端会隔几秒调一次这里；一旦本地有了 project.json 且父壁纸未订阅，就补订父链。
+ */
+async function apiDepsFollowup(body) {
+  const cfg = settings.getConfig();
+  const id = String((body && body.id) || '').replace(/[^0-9]/g, '');
+  if (!id) throw new HttpError('缺少 id', 400);
+  const chain = dependencies.dependencyChain(cfg.wsDir, id);
+  if (!chain.length) return { ok: true, added: [], pending: false };
+  const sub = await apiSubscribedIds();
+  const subscribed = new Set((sub.ids || []).map(String));
+  const added = [];
+  const ctx = session.currentContext();
+  // 父先子后：先订最上面的祖先
+  for (const pid of chain.slice().reverse()) {
+    if (subscribed.has(String(pid))) continue;
+    const r = await steamApi.subscribe(String(pid), ctx);
+    if (r && r.ok) {
+      added.push(pid);
+      subscribed.add(String(pid));
+      session.logEvent('subscribe', pid + ' sub (依赖补订，子项 ' + id + ')');
+    }
+  }
+  if (added.length) subsCache = { at: 0, value: null, idSet: null, failTtl: false, failAt: 0 };
+  return { ok: true, added: added, dependencyChain: chain, pending: false };
+}
 
 /**
  * 已订阅项目清单（本地库口径）。
@@ -524,16 +619,42 @@ async function apiSubscribed(url) {
   if (!cfg.wsDir) {
     return { ok: false, error: '没找到创意工坊内容目录（steamapps/workshop/content/431960）', items: [], totalCount: 0 };
   }
-  const list = wallpaperEngine.listSubscribed(cfg.wsDir);
-  const map = await loadSubscribedMeta(cfg.wsDir, list.map((x) => x.id));
-  let items = list.map((x) => {
-    const meta = map.get(String(x.id)) || {};
+  // 用户点「刷新」= 强制重新读盘 + 重新拉 Steam 订阅列表（不走任何缓存）
+  if (url.searchParams.get('fresh') === '1') {
+    wallpaperEngine.clearLocalCaches();
+    subsCache = { at: 0, value: null, idSet: null, failTtl: false, failAt: 0 };
+  }
+
+  /*
+   * 列表口径：**以 Steam 的订阅列表为准**，本地库只提供"订阅时间 / 是否已下载"。
+   *
+   * 为什么必须这样：取消订阅后 Steam 不会立刻删本地文件夹（WE 也留着），
+   * 只看文件夹的话，取消订阅了十几分钟还显示"已订阅"（用户实测报的）。
+   * 取不到 Steam 列表（没登录 / Cookie 过期）才退回本地库，保证离线也能用。
+   */
+  const local = wallpaperEngine.listSubscribed(cfg.wsDir);
+  const localMap = new Map(local.map((x) => [String(x.id), x]));
+  let steamIds = null;
+  try {
+    const r = await apiSubscribedIds();
+    if (r && r.ok && Array.isArray(r.ids)) steamIds = r.ids.map(String);
+  } catch (e) {
+    /* 退回本地库 */
+  }
+  const ids = steamIds || local.map((x) => String(x.id));
+  const staleLocal = steamIds ? local.filter((x) => steamIds.indexOf(String(x.id)) < 0).length : 0;
+
+  const map = await loadSubscribedMeta(cfg.wsDir, ids);
+  let items = ids.map((id) => {
+    const loc = localMap.get(id);
+    const meta = map.get(String(id)) || {};
     return Object.assign({}, meta, {
-      id: String(x.id),
+      id: String(id),
       title: meta.title || '(未能读取标题)',
-      subscribedAt: x.subscribedAt,
-      fileSize: Number(meta.fileSize) || x.size || 0,
-      installed: true,
+      // 没有本地文件夹 = 订阅了但还没下载完 → 仍在列表里，但不能设为使用中
+      installed: !!loc,
+      subscribedAt: loc ? loc.subscribedAt : 0,
+      fileSize: Number(meta.fileSize) || (loc && loc.size) || 0,
     });
   });
 
@@ -562,6 +683,9 @@ async function apiSubscribed(url) {
     page: page,
     pageSize: pageSize,
     wsDir: cfg.wsDir,
+    // 从 Steam 列表为准；如果本地还留着一批已取消订阅的文件夹，把数量告诉前端
+    source: steamIds ? 'steam' : 'local',
+    staleLocalCount: staleLocal,
   };
 }
 
@@ -856,6 +980,16 @@ async function handle(ctx) {
     case '/api/subscribed':
       needMethod(['GET']);
       result = await apiSubscribed(url);
+      break;
+
+    // 依赖关系（父链 / 依赖它的子孙）+ 订阅后的依赖补订
+    case '/api/deps':
+      needMethod(['GET']);
+      result = await apiDeps(url);
+      break;
+    case '/api/item/deps-followup':
+      needMethod(['POST']);
+      result = await apiDepsFollowup(await readJson());
       break;
 
     case '/api/item/subscribe':

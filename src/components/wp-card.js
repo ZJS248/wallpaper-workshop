@@ -18,6 +18,8 @@ Vue.component('wp-card', {
     canApply: { type: Boolean, default: false },
     /** 附注（已订阅视图用来显示"订阅时间"），不传就不显示 */
     note: { type: String, default: '' },
+    /** 不能设为使用中时的说明（例如"还没下载完"） */
+    applyHint: { type: String, default: '' },
   },
   data() {
     return { imgFailed: false, hover: false };
@@ -122,7 +124,7 @@ Vue.component('wp-card', {
           <button class="mini-btn icon" :class="{ on: current }" :disabled="busy || !canApply"
                   :title="canApply
                     ? (current ? '当前使用中（点击重新应用）' : '设为使用中（应用为桌面壁纸）')
-                    : '还不能设为使用中：这个壁纸没订阅或还没下载到本地'"
+                    : (applyHint || '还不能设为使用中：这个壁纸没订阅或还没下载到本地')"
                   @click="onApply">▶</button>
           <button class="mini-btn icon" title="在 Steam 中打开" @click="onSteam">↗</button>
         </div>

@@ -518,6 +518,11 @@ function listSubscribed(wsDir) {
 
 /** 读 ACF 里每个项目的 timeupdated / size（失败就返回空表） */
 let acfCache = { at: 0, dir: '', value: {} };
+/** 手动刷新时把本地缓存全清掉（用户点了「刷新」就该重新读盘） */
+function clearLocalCaches() {
+  acfCache = { at: 0, dir: '', value: {} };
+  localCache = { at: 0, wsDir: '', value: null };
+}
 function readAcfTimes(wsDir) {
   if (!wsDir) return {};
   if (acfCache.dir === wsDir && Date.now() - acfCache.at < 30 * 1000) return acfCache.value;
@@ -648,6 +653,7 @@ module.exports = {
   listLocalLibrary,
   listSubscribed,
   readAcfTimes,
+  clearLocalCaches,
   pickControlFile,
   idFromFile,
 };

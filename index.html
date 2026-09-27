@@ -223,10 +223,15 @@
           <option value="title">名称</option>
         </select>
         <span class="count">共 {{ subs.totalCount }} 个已订阅</span>
-        <button class="fbtn sm" :disabled="subs.loading" @click="loadSubscribed">
+        <button class="fbtn sm" :disabled="subs.loading" @click="loadSubscribed(true)"
+                title="重新读本地库 + 重新拉 Steam 订阅列表（取消订阅后点这里）">
           {{ subs.loading ? '读取中…' : '刷新' }}
         </button>
-        <span class="dim subs-src" :title="subs.wsDir || ''">数据来自本地创意工坊库（不用登录）</span>
+        <span class="dim subs-src" :title="subs.wsDir || ''">
+          <template v-if="subs.source === 'steam'">订阅状态来自 Steam（{{ subs.totalCount }} 个）</template>
+          <template v-else>Steam 列表取不到，按本地库显示</template>
+          <template v-if="subs.staleLocalCount">；本地还留着 {{ subs.staleLocalCount }} 个已取消订阅的文件</template>
+        </span>
       </div>
 
       <div v-if="subs.error" class="banner error">
@@ -255,7 +260,8 @@
                    :busy="!!busyIds[it.id]"
                    :size="it.fileSize || 0"
                    :current="isCurrentWallpaper(it.id)"
-                   :can-apply="true"
+                   :can-apply="!!it.installed"
+                   :apply-hint="it.installed ? '' : '还没下载完，下载完成后才能设为使用中'"
                    :note="shortDate(it.subscribedAt)"
                    @pick="selectItem"
                    @menu="openCardMenu"

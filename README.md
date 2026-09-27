@@ -350,6 +350,32 @@ POST /api/we/apply      → { id, monitor? }        # 后端执行 openWallpaper
   按钮显示为禁用，悬停提示"还不能设为使用中：这个壁纸没订阅或还没下载到本地"，
   右键菜单里那条也会变成"设为使用中（需先订阅并下载）"。
 
+### 依赖关系：订阅带父、退订带子孙
+
+WE 的依赖只写在**项目自己的 project.json** 里（`"dependency": "<父壁纸 id>"`，老版本字段名是
+`dependencies`）。Steam 的 `GetPublishedFileDetails` 里**没有**这个信息 —— 实测本地 180 个项目
+返回的 `children` 全是空数组，而这 180 个项目目前也没有一个声明 dependency（所以这条链现在是
+空转的，等有依赖的项目下载下来才会生效）。
+
+数据源与父项目 wallpaper-manager 一致（这边的 `server/lib/dependencies.js` 对应
+`HTML-website/service/wallpaperManager/{scanner.js,convert.js}`）：
+
+- scanner 逐个读 `project.json` 回填 `dependency`；
+- `convert.js` 里 `collectDescendants`（顺着 children 往下）+ `collectDependents`（反查"谁依赖我"）
+  在退订 / 转本地 / 删除时连锁展开，顺序是**父先子后**（订阅）/ **先子孙后父**（退订）。
+
+本项目实现同样语义：
+
+| 场景 | 行为 | 入口 |
+| --- | --- | --- |
+| 退订 | 先弹确认框列出「依赖它的 N 张」，确认后先退子孙、再退自己 | `GET /api/deps?id=` → `POST /api/item/subscribe` `{action:"unsub", withDependents:true}` |
+| 订阅 | 正常订阅；随后最多轮询 5 次 × 6 秒，把它依赖的**父链**补订上（父先子后） | `POST /api/item/deps-followup` |
+| 只查依赖 | 父链 + 依赖它的子孙（含间接、已去重、带标题） | `GET /api/deps?id=` |
+
+订阅为什么要轮询：刚点完订阅时项目还没下载完，本地没有 `project.json`，读不到 dependency；
+下载完成后（通常几秒）才补订父壁纸 —— WE 客户端也是这个行为（订阅子壁纸会带着父壁纸一起下载）。
+依赖索引有 60 秒进程内缓存，订阅状态一变（`/api/item/subscribe`）就作废重算。
+
 ### 失败必须"说出来"：接口封装与登录态显示（已修）
 
 用户实测：`POST /api/item/subscribe` 请求体里明明是 `data.ok = false`（Steam 401），
