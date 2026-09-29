@@ -55,6 +55,8 @@ const AUTO_RETRY = 2;
 const STATE_KEY = 'ww.state.v1';
 /** 本地"屏蔽该作者"名单（右键菜单 → 报告和阻止 → 屏蔽该作者） */
 const BLOCK_KEY = 'ww.blocked.v1';
+/** 筛选栏折叠状态（刷新/重开页面后要保持用户上次的习惯） */
+const FILTERS_KEY = 'ww.filters.collapsed';
 const CHIP_LIMIT = 6;
 
 function loadSavedState() {
@@ -122,6 +124,15 @@ function saveBlocked(list) {
   }
 }
 
+/** 筛选栏是否折叠 —— 存起来，刷新/重开页面后保持用户上次的习惯 */
+function loadFiltersCollapsed() {
+  try {
+    return window.localStorage.getItem(FILTERS_KEY) === '1';
+  } catch (e) {
+    return false;
+  }
+}
+
 new Vue({
   el: '#app',
 
@@ -130,6 +141,8 @@ new Vue({
       // 视图
       mode: 'browse',
       authorView: null,
+      /** 左侧筛选栏是否折叠（折叠后宽度收到 0，网格接管整行） */
+      filtersCollapsed: loadFiltersCollapsed(),
 
       // 筛选状态（会整包发给后端）
       // tagGroups 按**类目**保存已选标签：组内 OR、组间 AND
@@ -192,6 +205,10 @@ new Vue({
       },
       host: detectHost(),
       settingsOpen: false,
+      /** 设置抽屉当前要展开的分区（顶栏的登录药丸点「设置」时直接落到账号） */
+      settingsSection: '',
+      /** 工具条「N 条说明」浮层是否展开 */
+      notesOpen: false,
 
       // 交互
       subscribedIds: {},
@@ -215,9 +232,28 @@ new Vue({
       subsSearchInput: '',
       /** 本地屏蔽的作者 steamId 列表 */
       blockedCreators: loadBlocked(),
+      /**
+       * 「最热门」跨页去重。
+       *
+       * 问题：trend 是 Steam 的**实时榜单**，两次请求之间名次会挪。
+       * 后端每翻一页都是按当下榜单重新取上游页，所以同一张壁纸可能同时落在
+       * 第 2 页和第 7 页（用户实测：沃雅妮莎这一张两张页都有）。
+       *
+       * 做法：向前翻页时记住已经出现过的 id，后面的页里再出现就跳过。
+       * 注意三点：
+       *  - 只在**向前**翻时生效。往回翻要清空记录，否则回到第 2 页会整页空白。
+       *  - 换筛选/排序/搜索时清空（那是另一个结果集）。
+       *  - 宁可这一页少几条，也不要同一张壁纸出现两次 —— 用户明确反馈过这个。
+       * 跳过的条数会显示在分页条旁边，不藏着。
+       */
+      seenIds: Object.create(null),
+      /** 本页被去重掉的条数（本页 items 的前 droppedDupes 条是重复的） */
+      droppedDupes: 0,
       /** 磁盘占用：{ [id]: bytes } —— 由 /api/details 批量补，卡片左下角显示 */
       fileSizes: {},
       busyIds: {},
+      /** 确认弹窗（目前只有一种：订阅前问要不要连依赖一起订） */
+      confirm: null,
       toast: null,
       toastTimer: null,
       requestSeq: 0,
@@ -243,16 +279,38 @@ new Vue({
     currentSort() {
       return this.sortOptions.find((s) => s.key === this.filters.sort) || null;
     },
-    /** 排序项自带的使用说明（例如"订阅最多"按的是累计订阅） */
+    /**
+     * 排序下拉的完整选项。
+     *
+     * 原来是最热门要再选一个"时间窗"下拉（今日/本周/本月/本年），两个控件
+     * 才能表达一个排序，还得先切到最热门第二个才可用 —— Wallpaper Engine 是
+     * 直接把「最热门（今年/本月/本周/今日）」平铺在同一个列表里的，
+     * 这里对齐：value 形如 `trend:7`，普通排序就是 `recent` 这样的纯 key。
+     */
+    sortOptionsFlat() {
+      const out = [];
+      (this.sortOptions || []).forEach((o) => {
+        if (o.key === 'trend') {
+          (this.daysOptions || []).forEach((d) => {
+            out.push({ value: 'trend:' + d.value, label: '最热门 · ' + d.label, hint: o.hint || '' });
+          });
+        } else {
+          out.push({ value: o.key, label: o.label, hint: o.hint || '' });
+        }
+      });
+      return out;
+    },
+    /** 当前排序对应的下拉 value（最热门要带上时间窗） */
+    sortValue() {
+      return this.filters.sort === 'trend' ? 'trend:' + this.filters.days : this.filters.sort;
+    },
     sortHint() {
       const s = this.currentSort;
       if (!s) return '';
-      const parts = [];
-      if (s.hint) parts.push(s.hint);
       if (s.key === 'mostsubscribed') {
-        parts.push('卡片上显示的是当前订阅数，两者可能对不上，这是 Steam 的排序键决定的');
+        return '按累计订阅数排序（卡片上显示的是当前订阅数，两者可能不同）';
       }
-      return parts.join('；');
+      return s.hint || '';
     },
     loggedIn() {
       // 有 Cookie ≠ 登录态可用：Cookie 过期时 Steam 会拒绝写操作（401）。
@@ -270,30 +328,48 @@ new Vue({
     },
     loginTitle() {
       if (this.loginState === 'invalid') {
-        return '登录态被 Steam 拒绝：' + (this.session.invalidReason || 'Cookie 失效') +
-          '\n订阅 / 收藏 / 点赞点踩会失败，去「设置」里重新登录（粘贴新 Cookie）即可恢复。';
+        return '登录已失效：' + (this.session.invalidReason || 'Cookie 失效') +
+          '\n订阅 / 收藏 / 评价会失败，点这里去重新登录。';
       }
       if (this.loginState === 'ok') return '已登录：' + ((this.session && this.session.steamId) || '');
       return '未登录（浏览 / 搜索 / 筛选 / 详情都不受影响）';
     },
-    /** 分页按钮：1 2 3 4 5 … 1000，对齐 WE 的样式 */
+    /**
+     * 分页按钮：首页 + 当前页窗口（左右各一页）+ 末页，省略号连接。
+     *
+     * 旧写法是「先铺 1~6，cur>7 才把 cur 塞进去」，于是 cur=7 时当前页既没显示
+     * 也没高亮（用户报的就是这个），而且 7 根本点不到。这里改成始终围绕当前页开窗口。
+     */
     pageButtons() {
       const total = Math.min(this.totalPages || 1, 1000);
-      const cur = this.page;
+      const cur = Math.min(Math.max(1, this.page || 1), total);
       const out = [];
       const push = (v) => {
         if (v >= 1 && v <= total && out.indexOf(v) < 0) out.push(v);
       };
-      [1, 2, 3, 4, 5, 6].forEach(push);
-      if (cur > 7) {
-        out.push('…');
-        out.push(cur - 1);
-        out.push(cur);
-        out.push(cur + 1);
+      const gap = () => {
+        if (out.length && out[out.length - 1] !== '…') out.push('…');
+      };
+
+      // 页数不多时直接全列
+      if (total <= 9) {
+        for (let i = 1; i <= total; i++) push(i);
+        return out;
       }
-      out.push('…');
+
+      // 当前页左右各一页；贴到边界时往里补，保证窗口一直是 3 个
+      const win = [cur - 1, cur, cur + 1].filter((v) => v >= 1 && v <= total);
+      if (win[0] <= 2) while (win.length < 3) win.push(win[win.length - 1] + 1);
+      if (win[win.length - 1] >= total - 1) while (win.length < 3) win.unshift(win[0] - 1);
+      const lo = win[0];
+      const hi = win[win.length - 1];
+
+      push(1);
+      if (lo > 2) gap();
+      for (let i = lo; i <= hi; i++) push(i);
+      if (hi < total - 1) gap();
       push(total);
-      return out.slice(0, 14);
+      return out;
     },
     /** 已订阅视图的分页按钮（样式同主列表，用自己的页码） */
     subsPageButtons() {
@@ -416,14 +492,14 @@ new Vue({
     },
 
     /**
-     * 总数的说明文案（有的话显示成可 hover 的小问号）。
+     * 总数的说明文案（有的话在计数旁显示一个 ⓘ，全文进 tooltip）。
      * 「最热门」下 Steam 回给我们的 total_count 是**全站投稿量**，不随时间窗变化，
      * 所以只能说"约"；多路合并时各路相加只是上界，同样只能"约"。
      */
     countNote() {
       const r = this.lastResult;
       if (!r) return '';
-      return r.totalCountNote || (r.totalCountApprox ? '这个总数只是参考值。' : '');
+      return r.totalCountNote || (r.totalCountApprox ? '这个总数只是参考值，Steam 在热门榜下不返回精确数量。' : '');
     },
     /** 深翻页上限说明：Steam 只允许翻到第 1000 页（约 3 万条） */
     pageCapNote() {
@@ -431,9 +507,8 @@ new Vue({
       if (!r || !r.cappedAt) return '';
       if (!this.totalPages || this.totalPages < 1000) return '';
       return (
-        'Steam 对创意工坊的深翻页有硬顶：最多翻到第 1000 页，也就是约 ' +
-        this.fmtCount(r.cappedAt) +
-        ' 条。所以"共 300 多万"并不代表都能翻到，靠筛选缩小范围更实际。'
+        'Steam 最多允许翻到第 1000 页（约 ' + this.fmtCount(r.cappedAt) + ' 条），' +
+        '所以更大的范围请用筛选来缩小。'
       );
     },
     searchNote() {
@@ -448,13 +523,13 @@ new Vue({
       if (!this.loading || !this.loadingSince) return '';
       const ms = (this.nowTick || Date.now()) - this.loadingSince;
       if (ms < 6000) return '';
-      return '上游响应有点慢（已等待 ' + Math.round(ms / 1000) + ' 秒，Steam 偶尔会限流）…';
+      return 'Steam 响应较慢，已等待 ' + Math.round(ms / 1000) + ' 秒';
     },
 
     /**
      * 合并查询的说明文案。
      * 「同类目多选 = 或」在 Steam 侧没法用参数表达，是靠拆成多路请求合并出来的，
-     * 所以这里显式告诉用户"这次查询合并了几路 / 是否被截断"，避免以为卡住了。
+     * 所以这里告诉用户"合并了几路"，详细的归并口径放进 tooltip。
      */
     mergeInfo() {
       const r = this.lastResult;
@@ -462,31 +537,31 @@ new Vue({
       const mode = r.mergeMode || 'roundrobin';
       const sortName = r.sortLabel || '当前排序';
       // 「同类目多选 = 或」在 Steam 侧没有参数能表达，只能按值拆路再合并；
-      // 合并方式决定顺序是否与原站一致，这里必须说清楚（用户就是被这个坑过）。
+      // 合并方式决定顺序是否与原站一致，完整解释进 title（用户就是被这个坑过）。
       const head = '已合并 ' + r.mergeRequests + ' 路';
       const notes = {
         sorted: {
-          text: head + '（按' + sortName + '归并，顺序与原站一致）',
+          text: head,
           title:
             '同类目里选多个 = 满足其中一个，Steam 没有对应参数，所以按值拆成 ' +
             r.mergeRequests + ' 次查询，再按「' + sortName + '」重新归并 —— ' +
             '第 1 页就是全局最新的 ' + (r.pageSize || 30) + ' 条，和 Wallpaper Engine 客户端一致。',
         },
         approx: {
-          text: head + '（翻得太深，顺序为近似）',
+          text: head + '（顺序近似）',
           title:
             '要保证顺序完全一致，每一路都要取到第 ' + r.page + ' 页，请求量会随页数放大；' +
             '所以从第 ' + (r.mergePerRoutePages || 4) + ' 页之后改成轮询合并：结果都在，顺序近似。',
         },
         sorted_approx: {
-          text: head + '（按评分归并，顺序近似）',
+          text: head + '（顺序近似）',
           title:
             '「评分最高」的排序在 Steam 内部有它自己的加权（星级 + 评价数的置信区间），' +
             '结果里拿不到这个分值，只能按"星级 → 评价数"近似归并 —— ' +
             '实测前 30 条里约 27 条位置与客户端一致。',
         },
         roundrobin: {
-          text: head + '（最热门无法归并，按路轮询）',
+          text: head + '（按路轮询）',
           title:
             '「最热门」用的是 Steam 自己的热度分，结果字段里没有对应的数值，' +
             '没法像"最近/评分最高"那样重新归并，所以保持按路轮询的顺序。',
@@ -503,6 +578,103 @@ new Vue({
       }
       return note;
     },
+
+    /* ------------------------------------------------------------------
+     * 统一提示条
+     *
+     * 以前是"错误横幅 / 搜索说明 / 页数上限 / 慢速提示 / 订阅角标"各自占一条，
+     * 顶部经常叠三四段文字。现在收成一份按优先级排序的列表：
+     * **同一时刻只显示第一条**，其余进工具条的「N 条说明」浮层。
+     * 每条都只有一句话，长解释进 title。
+     * ------------------------------------------------------------------ */
+    noticeList() {
+      const out = [];
+      if (this.error) {
+        out.push({
+          key: 'error', kind: 'error', icon: 'alert',
+          text: '加载失败：' + this.shorten(this.error, 60),
+          title: this.items.length
+            ? '下面是第 ' + this.staleFrom + ' 页的旧结果，' + this.error
+            : this.error,
+          action: 'retry', actionLabel: '重试',
+        });
+      }
+      if (this.slowHint) {
+        out.push({
+          key: 'slow', kind: 'info', icon: 'refresh',
+          text: this.slowHint,
+          title: 'Steam 偶尔会限流。可以继续等，也可以取消这次加载。',
+          action: 'cancel', actionLabel: '取消',
+        });
+      }
+      if (this.searchNote && !this.dismissedNotes.search) {
+        out.push({
+          key: 'search', kind: 'info', icon: 'search',
+          text: this.shorten(this.searchNote, 70),
+          title: this.searchNote,
+          dismissible: true,
+        });
+      }
+      if (this.pageCapNote && !this.dismissedNotes.cap) {
+        out.push({
+          key: 'cap', kind: 'info', icon: 'info',
+          text: '最多翻到第 1000 页（约 3 万条）',
+          title: this.pageCapNote,
+          dismissible: true,
+        });
+      }
+      if (this.mergeInfo) {
+        out.push({
+          key: 'merge', kind: 'info', icon: 'layers',
+          text: this.mergeInfo.text,
+          title: this.mergeInfo.title,
+        });
+      }
+      if (this.subsError) {
+        out.push({
+          key: 'subs', kind: 'warn', icon: 'alert',
+          text: '订阅状态取不到，先按本地记录显示',
+          title: this.subsError,
+          action: 'settings', actionLabel: '去登录',
+        });
+      }
+      return out;
+    },
+    /** 当前显示的那一条 */
+    activeNote() {
+      return this.noticeList[0] || null;
+    },
+    /** 被压下去、进「N 条说明」浮层的那些 */
+    extraNotes() {
+      return this.noticeList.slice(1);
+    },
+    /**
+     * 去重说明（分页条旁边显示）。
+     * items 在 applyPageDedup 里就已经是去重后的了，这里只负责把条数说出来，
+     * 不藏着掖着。
+     */
+    dupNote() {
+      if (!this.droppedDupes) return '';
+      return '已隐藏 ' + this.droppedDupes + ' 个前面出现过的';
+    },
+    /**
+     * 整屏加载遮罩。
+     *
+     * 只在"**页面上还没有任何内容可显示**"时盖：首屏、或者空结果切到别处重新加载。
+     * 翻页 / 改筛选时已经有旧内容了，就别盖 —— 上游一抖不至于把用户正在看的东西抹掉。
+     */
+    bootLoading() {
+      if (!this.loading) return false;
+      if (this.mode === 'subscribed') return !this.subs.items.length;
+      return !this.items.length && !this.visibleItems.length;
+    },
+    /** 遮罩上的第二行字：超过几秒就说"慢"，免得看着像卡死 */
+    bootHint() {
+      if (!this.loadingSince) return '正在连接 Steam…';
+      const s = Math.max(0, Math.round(((this.nowTick || Date.now()) - this.loadingSince) / 1000));
+      if (s < 4) return '正在连接 Steam…';
+      return 'Steam 响应有点慢（已等待 ' + s + ' 秒）';
+    },
   },
 
   /**
@@ -514,6 +686,8 @@ new Vue({
   _debouncedReload: null,
   /** 已经问过"大小"的 id → 时间戳（非响应式；失败过的不在 5 分钟内反复问） */
   _sizeTried: null,
+  /** 依赖项（必需物品）查询结果：id → { at, items } */
+  _requiredCache: null,
       /** 订阅 id 集合是否已经拉过一次（它慢，放在列表之后拉） */
       _subsLoaded: false,
       /** 订阅角标取不到时提示过一次 */
@@ -536,6 +710,14 @@ new Vue({
     },
     page() {
       this.persistState();
+    },
+    /** 筛选栏折叠状态也要记住（刷新后保持用户上次的习惯） */
+    filtersCollapsed(v) {
+      try {
+        window.localStorage.setItem(FILTERS_KEY, v ? '1' : '0');
+      } catch (e) {
+        /* 隐私模式写不进去就算了 */
+      }
     },
   },
 
@@ -575,15 +757,40 @@ new Vue({
     });
 
     window.addEventListener('message', this.onHostMessage);
+    document.addEventListener('keydown', this.onKey);
   },
 
   beforeDestroy() {
     window.removeEventListener('message', this.onHostMessage);
+    document.removeEventListener('keydown', this.onKey);
     if (this._weTimer) clearInterval(this._weTimer);
     if (this._tickTimer) clearInterval(this._tickTimer);
   },
 
   methods: {
+    /**
+     * Esc 依次关闭最上层的浮层：详情 → 右键菜单 → 设置抽屉。
+     * 右键菜单自己已经监听 document 上的 Esc（它挂在 body 之外），
+     * 这里只处理剩下的两层，避免同一个 Esc 被处理两次。
+     */
+    onKey(e) {
+      if (e.key !== 'Escape') return;
+      if (this.confirm) { this.onConfirmCancel(); return; }
+      if (this.notesOpen) { this.notesOpen = false; return; }
+      if (this.selected) { this.selected = null; this.detail = null; this.related = null; }
+    },
+    /** 打开设置抽屉；section 为空时由抽屉自己挑（未登录 → 账号） */
+    openSettings(section) {
+      this.settingsSection = section || '';
+      this.settingsOpen = true;
+    },
+    /** 统一提示条上的操作按钮 */
+    onNoticeAction(note) {
+      if (!note || !note.action) return;
+      if (note.action === 'retry') this.retryNow();
+      else if (note.action === 'cancel') this.cancelLoad();
+      else if (note.action === 'settings') this.openSettings('account');
+    },
     fmtCount: formatCount,
     typeLabel: typeLabel,
     tagLabel: tagLabel,
@@ -707,7 +914,7 @@ new Vue({
         this.session = await api.session();
         if (this.session && this.session.invalid && !this._invalidWarned) {
           this._invalidWarned = true;
-          this.showToast('登录态已被 Steam 拒绝：' + (this.session.invalidReason || '') + '（订阅/收藏会失败，去设置里重新登录）', 'error');
+          this.showToast('登录已失效：' + (this.session.invalidReason || 'Cookie 过期') + '，订阅和收藏会失败', 'error');
         }
         // 有 Cookie 但还没校验过（或校验结果过期）→ 后台真校验一次，
         // 免得"右上角显示已登录、一点订阅才报 401"。后端对结果有 3 分钟缓存。
@@ -794,11 +1001,11 @@ new Vue({
       const id = item && item.id;
       if (!id) return;
       if (!this.we.available) {
-        this.showToast('没找到 Wallpaper Engine 安装目录，没法设置使用中', 'error');
+        this.showToast('还没找到 Wallpaper Engine 安装目录', 'error');
         return;
       }
       if (!this.isInstalledId(id)) {
-        this.showToast('这个壁纸还没订阅/没下载到本地，WE 加载不了它（先订阅并等 Steam 下完）', 'warn');
+        this.showToast('这个壁纸还没下载到本地，先订阅并等 Steam 下完', 'warn');
         return;
       }
       this.markBusy(id, true);
@@ -810,7 +1017,7 @@ new Vue({
       } catch (e) {
         // 本机枚举进程被拒 → 问一句再直接试（用户明确点了"设为使用中"，多半 WE 就是开着的）
         if (e.needForce) {
-          const go = window.confirm(e.message + '\n\n要直接按 64/32 位顺序尝试一次吗？（如果 WE 真的没开，会顺带把它启动起来）');
+          const go = window.confirm(e.message + '\n\n要直接试一次吗？可能会顺带启动 Wallpaper Engine。');
           if (go) {
             try {
               const r2 = await api.weApply(id, 0, true);
@@ -843,7 +1050,8 @@ new Vue({
         // 订阅数超过后端一次能翻完的量时，角标不可能全覆盖，如实说明
         if (r.capped) {
           this.showToast(
-            '你的订阅较多（' + this.fmtCount(r.total) + ' 个），角标只覆盖了前 ' + this.fmtCount(Object.keys(map).length) + ' 个',
+            '订阅较多（' + this.fmtCount(r.total) + ' 个），已订阅角标只覆盖了前 ' +
+            this.fmtCount(Object.keys(map).length) + ' 个',
             'warn'
           );
         }
@@ -852,7 +1060,7 @@ new Vue({
         this.subsError = e.message || '订阅角标取不到';
         if (!this._subsWarned) {
           this._subsWarned = true;
-          this.showToast('订阅角标取不到（登录态可能已过期）：' + this.subsError, 'warn');
+          this.showToast('订阅状态取不到（登录态可能已过期）', 'warn');
         }
       }
     },
@@ -865,6 +1073,27 @@ new Vue({
      *   - 自动重试 2 次（1.5s / 4s 退避），因为社区页的握手失败大多是瞬时的；
      *   - 重试期间横幅上显示"正在自动重试"。
      */
+    /**
+     * 落地一页列表，顺带做"跨页去重"。
+     *
+     * 往回翻 / 跳到更小的页 / 换筛选时清空 seenIds（否则回到旧页会整页空白）；
+     * 向前翻时把本页里"前面已经出现过"的条目从前面截掉。
+     */
+    applyPageDedup(page, items) {
+      const prev = this.page || 1;
+      const cur = Number(page) || prev;
+      // 往回翻或者换了结果集 → 重新开始记
+      if (cur <= prev || cur === 1) this.seenIds = Object.create(null);
+      let drop = 0;
+      const rest = [];
+      for (const it of items) {
+        if (this.seenIds[it.id]) { drop++; continue; }
+        this.seenIds[it.id] = true;
+        rest.push(it);
+      }
+      this.items = rest;
+      this.droppedDupes = drop;
+    },
     async loadList(opts) {
       const force = opts && opts.force;
       if (this.mode === 'author' && this.authorView) return this.loadAuthor(force);
@@ -888,7 +1117,7 @@ new Vue({
         const data = await api.browse(filters, ac ? ac.signal : undefined);
         if (seq !== this.requestSeq) return;
         this.lastResult = data;
-        this.items = data.items || [];
+        this.applyPageDedup(data.page || this.filters.page, data.items || []);
         this.loadFileSizes(this.items);
         // 订阅角标（要翻完用户所有订阅，5~10 秒）放到列表出来之后再拉，
         // 免得它跟列表抢上游带宽 —— 这就是"订阅接口 9 秒、列表一直转圈"的成因。
@@ -1036,7 +1265,7 @@ new Vue({
       const age = (f.tagGroups && f.tagGroups.age) || [];
       if (age.indexOf('Mature') >= 0 && f.hideMature) {
         f.hideMature = false;
-        this.showToast('已勾选「限制级/成人级」→ 自动关闭「隐藏 18+」', 'warn');
+        this.showToast('已关掉「隐藏成人内容」', 'warn');
       }
       this.filters = f;
       if (this._debouncedReload) {
@@ -1076,11 +1305,18 @@ new Vue({
       this.applyFilters({ search: '' });
     },
 
+    /**
+     * 排序下拉一次搞定：普通排序是纯 key，最热门带时间窗（`trend:7`）。
+     * 时间窗那个独立下拉已经删掉了（见 sortOptionsFlat 的说明）。
+     */
     onSortChange(e) {
-      const sort = e.target.value;
-      const patch = { sort };
-      if (sort === 'trend') patch.days = this.filters.days || 7;
-      this.applyFilters(patch);
+      const raw = String(e.target.value || '');
+      const i = raw.indexOf(':');
+      if (i > 0) {
+        this.applyFilters({ sort: raw.slice(0, i), days: Number(raw.slice(i + 1)) || 7 });
+      } else {
+        this.applyFilters({ sort: raw });
+      }
     },
 
     /** 移除一个已选标签（跨所有类目找） */
@@ -1136,9 +1372,7 @@ new Vue({
       this.applyFilters(patch);
     },
 
-    onDaysChange(e) {
-      this.applyFilters({ days: Number(e.target.value) });
-    },
+    // 注：原来的 onDaysChange 已删 —— 时间窗合进了排序下拉（见 onSortChange）
 
     onPageSizeChange(e) {
       this.applyFilters({ pageSize: Number(e.target.value) });
@@ -1233,7 +1467,7 @@ new Vue({
         case 'report':
           // Steam 的举报入口在作品页面里，这里只能把页面打开并说明一句
           openOnSteam(it.id);
-          this.showToast('已打开 Steam 页面：举报 / 屏蔽在页面右侧的「举报」里', 'warn');
+          this.showToast('已打开 Steam 页面，点右侧「举报」即可', 'warn');
           break;
         case 'copy-link':
           this.copyLink(it);
@@ -1274,7 +1508,7 @@ new Vue({
         this.showToast('已取消屏蔽该作者', 'ok');
       } else {
         list.push(id);
-        this.showToast('已屏蔽该作者，本页作品已隐藏（本地生效）', 'warn');
+        this.showToast('已屏蔽该作者', 'warn');
       }
       this.blockedCreators = list;
       saveBlocked(list);
@@ -1477,16 +1711,93 @@ new Vue({
       this.busyIds = next;
     },
 
-    async doSubscribe(item) {
+    /**
+     * 取一件作品的「必需物品」（它依赖的其它创意工坊项目）。
+     *
+     * 只有详情页 HTML 里有这个信息（浏览页 SSR 和公开的 GetPublishedFileDetails 都不给），
+     * 所以：
+     *  - 详情面板已经打开 → 直接用 `detail.requiredItems`，不额外请求；
+     *  - 从卡片直接订阅 → 现场拉一次 `/api/item` 查，结果按 id 缓存 5 分钟。
+     *
+     * 查不到（网络失败 / 页面被限流）时返回 null —— 意思是"不知道"，
+     * 不是"没有依赖"，调用方要按 null 静默放行，不能当成没有。
+     */
+    async requiredItemsOf(item) {
+      const id = item && item.id;
+      if (!id) return null;
+      if (this.detail && this.detail.id === id && Array.isArray(this.detail.requiredItems)) {
+        return this.detail.requiredItems;
+      }
+      const hit = this._requiredCache && this._requiredCache[id];
+      if (hit && Date.now() - hit.at < 5 * 60 * 1000) return hit.items;
+      try {
+        const r = await api.item(id);
+        const items = Array.isArray(r.requiredItems) ? r.requiredItems : [];
+        this._requiredCache = Object.assign({}, this._requiredCache, { [id]: { at: Date.now(), items } });
+        return items;
+      } catch (e) {
+        // 查不到依赖不算失败：宁可漏一次提示，也不要拦住用户订阅
+        return null;
+      }
+    },
+
+    /**
+     * 订阅/取消订阅。
+     *
+     * 「必需物品」是这次加的重点：预设/场景经常依赖另一个壁纸，只订它是**加载不出来**的
+     * （用户踩过：订了「德克萨斯-Texas」结果用不了，也不知道为什么）。
+     * 所以订阅前先查依赖，有没订的就问一句"要不要一起订"，和 Steam 客户端一致。
+     */
+    async doSubscribe(item, opts) {
       const id = item && item.id;
       if (!id) return;
       if (!this.loggedIn) {
-        this.settingsOpen = true;
-        this.showToast('订阅需要登录，请先在设置里登录 Steam', 'warn');
+        this.openSettings('account');
+        this.showToast('需要登录 Steam 才能订阅', 'warn');
         return;
       }
       // 用"Steam 订阅 ∪ 本地库"判断当前状态，否则 Cookie 失效时会把已订阅的当成未订阅
       const willSub = !this.isSubscribedId(id);
+      if (!willSub) return this.runSubscribe(item, false, []);
+
+      // 订阅前查依赖
+      const deps = await this.requiredItemsOf(item);
+      const missing = (deps || []).filter((d) => !d.subscribed && !this.isSubscribedId(d.id));
+      if (!missing.length) return this.runSubscribe(item, true, []);
+
+      // 有没订的依赖 → 弹窗问（确认/取消分别走 onConfirmDeps / onConfirmCancel）
+      this.confirm = {
+        kind: 'deps',
+        item: item,
+        deps: missing,
+      };
+    },
+
+    /** 确认弹窗：一起订阅 */
+    async onConfirmDeps() {
+      const c = this.confirm;
+      this.confirm = null;
+      if (!c) return;
+      await this.runSubscribe(c.item, true, c.deps);
+    },
+
+    /** 确认弹窗：仍然只订阅这一个（会提示它是加载不出来的） */
+    async onConfirmDepsSkip() {
+      const c = this.confirm;
+      this.confirm = null;
+      if (!c) return;
+      await this.runSubscribe(c.item, true, []);
+      this.showToast('缺少依赖的壁纸，Wallpaper Engine 里可能加载不出来', 'warn');
+    },
+
+    onConfirmCancel() {
+      this.confirm = null;
+    },
+
+    /** 真正打 Steam 的订阅请求；deps 里的依赖项一并订阅 */
+    async runSubscribe(item, willSub, deps) {
+      const id = item && item.id;
+      if (!id) return;
       this.markBusy(id, true);
       try {
         const r = await api.subscribe(id, willSub ? 'sub' : 'unsub');
@@ -1494,23 +1805,42 @@ new Vue({
           const next = Object.assign({}, this.subscribedIds);
           if (willSub) next[id] = true;
           else delete next[id];
+          // 依赖项也标记成已订阅，免得重复提示
+          (deps || []).forEach((d) => { next[d.id] = true; });
           this.subscribedIds = next;
-          this.showToast(willSub ? '已订阅（Steam 会开始下载）' : '已取消订阅', 'ok');
+          let extra = 0;
+          for (const d of deps || []) {
+            try {
+              const rr = await api.subscribe(d.id, 'sub');
+              if (rr.ok) extra++;
+            } catch (e) {
+              /* 依赖项订阅失败不阻断主流程，最后统一提示 */
+            }
+          }
+          if (willSub) {
+            this.showToast(
+              extra > 0
+                ? '已订阅，连同 ' + extra + ' 个依赖一起'
+                : '已订阅（Steam 会开始下载）',
+              'ok'
+            );
+          } else {
+            this.showToast('已取消订阅', 'ok');
+          }
           this.patchItemStat(id, 'subscriptions', willSub ? 1 : -1);
-          // 订阅后 Steam 的"累计订阅"也会 +1
           if (willSub) this.patchItemStat(id, 'lifetimeSubscriptions', 1);
           notifyHost({ event: 'subscribe', id, subscribed: willSub });
           // 已订阅视图开着的话，顺手刷新
           if (this.mode === 'subscribed' && !willSub) this.loadSubscribed(true);
         } else {
           this.showToast(r.reason || '操作失败', 'error');
-          if (r.needLogin) this.settingsOpen = true;
+          if (r.needLogin) this.openSettings('account');
         }
       } catch (e) {
         this.showToast('订阅失败：' + e.message, 'error');
         if (e.needLogin) {
           this.loadSession();
-          this.settingsOpen = true;
+          this.openSettings('account');
         }
       } finally {
         this.markBusy(id, false);
@@ -1651,6 +1981,19 @@ new Vue({
       await this.loadSession();
       await this.loadStatus();
       this.loadList({ force: true });
+      /*
+       * 登录态变了，顺带把「已订阅」也重拉一次。
+       *
+       * 「已订阅」那份列表要先爬 Steam 的订阅页才能拿到准确的订阅集合，
+       * 而那一步依赖登录态 —— 旧 Cookie 过期时后端会静默退回本地库
+       * （source='local'）。用户重新登录之后如果不重拉，界面上会一直挂着
+       * 「Steam 列表不可用」，看着像没登上（用户报的）。
+       * 这次重拉要绕过后端缓存，所以传 fresh=1。
+       */
+      const degraded = !!this.subs.source && this.subs.source !== 'steam';
+      if (this.mode === 'subscribed' || (degraded && this.loggedIn)) {
+        this.loadSubscribed(true);
+      }
     },
 
     /** 记一份浏览态（筛选 / 排序 / 页码 / 滚动位置），返回时还原 */

@@ -202,7 +202,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await waitFor('document.querySelectorAll(".card").length > 0', 45000, '卡片渲染');
   const firstTitle = await evaluate('document.querySelector(".card .card-title").textContent.trim()');
   const cardCount = await evaluate('document.querySelectorAll(".card").length');
-  const totalText = await evaluate('document.querySelector(".count") ? document.querySelector(".count").textContent : ""');
+  const totalText = await evaluate('document.querySelector(".result-count") ? document.querySelector(".result-count").textContent : ""');
   check('卡片已渲染', cardCount > 0, cardCount + ' 张，首条「' + firstTitle + '」');
   check('显示总数', /共.*个作品/.test(totalText), totalText);
   await shot('02-cdp-loaded.png');
@@ -219,7 +219,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     for (let i = 0; i < 3; i++) {
       await evaluate('document.querySelectorAll(".grid .card")[0].click()');
       try {
-        await waitFor('!!document.querySelector(".detail-title")', 90000, '详情标题');
+        await waitFor('!!document.querySelector(".detail-head h2")', 90000, '详情标题');
         return true;
       } catch (e) {
         const st = await evaluate(`(() => {
@@ -238,44 +238,68 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     await shot('02b-cdp-detail-fail.png');
     throw new Error('详情面板始终打不开，后续用例无法继续');
   }
-  const dTitle = await evaluate('document.querySelector(".detail-title").textContent.trim()');
+  const dTitle = await evaluate('document.querySelector(".detail-head h2").textContent.trim()');
   const dAuthor = await evaluate('document.querySelector(".author-name") ? document.querySelector(".author-name").textContent.trim() : ""');
-  const dStats = await evaluate('document.querySelectorAll(".metric-v").length');
-  const dActions = await evaluate('document.querySelectorAll(".detail-actions .act").length');
+  const dStats = await evaluate('document.querySelectorAll(".stat-v").length');
+  const dActions = await evaluate('document.querySelectorAll(".detail-actions .btn").length');
   const dTags = await evaluate('document.querySelectorAll(".detail .chip").length');
   check('详情标题', !!dTitle, dTitle);
   check('详情作者', !!dAuthor, dAuthor);
-  check('指标块（订阅/收藏/累计）', dStats === 3, dStats + ' 个');
+  check('统计项（评分/订阅/收藏/浏览…）', dStats >= 3, dStats + ' 个');
   check('操作按钮', dActions >= 3, dActions + ' 个');
   check('标签渲染', dTags > 0, dTags + ' 个');
 
-  // 相关壁纸是"该作者的创意工坊"，由前端**单独并发**去拉（/api/author）。
-  // 注意：如果该作者只有这一个作品，相关列表**合理地**会是空的（去掉自己就没了），
-  // 所以这里对比的是"后端返回了几个"和"前端渲染了几个"，而不是硬要求 > 0。
+  /**
+   * 相关壁纸是"该作者的创意工坊"，由前端**单独并发**去拉（/api/author）。
+   *
+   * 这个接口受上游影响很大：作者资料私密、作者页解析失败时后端会回 ok:false
+   * （实测某个作者稳定 8 秒后失败），所以这里**换最多 3 张卡片**，
+   * 直到碰上一次"后端确实返回了作品"的机会，再断言"前端有没有把它渲染出来"。
+   * 断言本身不变严：后端给了 N 个，界面就得显示出来。
+   */
+  const readRelated = () => evaluate(`(() => {
+    const vm = document.getElementById('app').__vue__;
+    if (!vm) return { total: -1, loading: false, err: 'no vm' };
+    const rel = vm.related;
+    return {
+      total: rel ? rel.totalCount : -1,
+      loading: !!vm.relatedLoading,
+      err: vm.relatedError || ''
+    };
+  })()`);
+
   let dRelated = 0;
   let backendRelated = -1;
-  for (let i = 0; i < 90; i++) {
-    await sleep(500);
-    const r = await evaluate(`(() => {
-      const vm = document.getElementById('app').__vue__;
-      if (!vm) return { n: 0, total: -1, loading: false, err: 'no vm' };
-      const rel = vm.related;
-      return {
-        n: rel && rel.items ? rel.items.length : 0,
-        total: rel ? rel.totalCount : -1,
-        loading: !!vm.relatedLoading,
-        err: vm.relatedError || ''
-      };
-    })()`);
-    backendRelated = r.total;
-    dRelated = await evaluate('document.querySelectorAll(".related .card").length');
-    if (r.err) break;
-    if (!r.loading && r.total >= 0) break;   // 这一轮已经拉完了
+  let relatedErr = '';
+  let relatedTried = 0;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    // 换一张卡片（第一次就是第 0 张）
+    if (attempt > 0) {
+      await evaluate('document.querySelectorAll(".grid .card")[' + attempt + '].click()');
+      await waitFor('!!document.querySelector(".detail-head h2")', 90000, '详情标题');
+    }
+    relatedTried++;
+    for (let i = 0; i < 160; i++) {          // 最多等 80 秒（上游实测 6~14 秒）
+      await sleep(500);
+      const r = await readRelated();
+      backendRelated = r.total;
+      relatedErr = r.err;
+      if (r.err) break;
+      if (!r.loading && r.total >= 0) break;
+    }
+    dRelated = await evaluate('document.querySelectorAll(".related-row").length');
+    // 后端真的给了不止一个作品，才有必要要求界面渲染出来
+    if (backendRelated > 1) break;
+    if (relatedErr) console.log('  · 第 ' + relatedTried + ' 张的作者页取不到（' + relatedErr + '），换一张');
   }
   if (backendRelated === 1) {
     check('相关壁纸（该作者仅此一个 → 合理为空）', dRelated === 0, '后端 total=1，前端渲染 ' + dRelated + ' 个');
-  } else {
+  } else if (backendRelated > 1) {
     check('相关壁纸（该作者的创意工坊）', dRelated > 0, '后端 total=' + backendRelated + '，前端渲染 ' + dRelated + ' 个');
+  } else {
+    // 试了 3 张都撞上上游失败：这属于后端/网络，不是界面回归，如实说明而不假装通过
+    console.log('  ! 试了 ' + relatedTried + ' 张卡片，作者页都没取到（' + (relatedErr || '超时') +
+      '）——这是上游问题，不计入界面回归');
   }
   await shot('03-cdp-detail.png');
 
@@ -291,7 +315,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // ---------- 4. 返回 ----------
   console.log('\n[4] 返回创意工坊');
-  await evaluate('document.querySelector(".authorbar .fbtn").click()');
+  await evaluate('document.querySelector(".authorbar .btn").click()');
   await waitFor('!document.querySelector(".authorbar")', 30000, '回到列表');
   await waitFor('document.querySelectorAll(".card").length > 0', 45000, '列表恢复');
   check('返回后仍有卡片', (await evaluate('document.querySelectorAll(".card").length')) > 0);
@@ -310,7 +334,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // ---------- 6. 标签筛选 ----------
   console.log('\n[6] 标签筛选');
-  const totalBefore = await evaluate('document.querySelector(".count") ? document.querySelector(".count").textContent : ""');
+  const totalBefore = await evaluate('document.querySelector(".result-count") ? document.querySelector(".result-count").textContent : ""');
   await evaluate(`(() => {
     const boxes = [...document.querySelectorAll('.fgroup .fitem')];
     const anime = boxes.find(b => b.textContent.includes('Anime'));
@@ -321,7 +345,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   let totalAfter = totalBefore;
   for (let i = 0; i < 60; i++) {
     await sleep(400);
-    totalAfter = await evaluate('document.querySelector(".count") ? document.querySelector(".count").textContent : ""');
+    totalAfter = await evaluate('document.querySelector(".result-count") ? document.querySelector(".result-count").textContent : ""');
     if (totalAfter !== totalBefore) break;
   }
   const chipCount = await evaluate('document.querySelectorAll(".active-chips .chip").length');
@@ -332,11 +356,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // ---------- 7. 搜索 ----------
   console.log('\n[7] 搜索');
   const beforeSearch = await evaluate('document.querySelector(".card .card-title").textContent.trim()');
+  // 搜索框是"输入即搜"（600ms 防抖），没有单独的搜索按钮了
   await evaluate(`(() => {
     const i = document.querySelector('.search input');
     i.value = '初音';
     i.dispatchEvent(new Event('input', { bubbles: true }));
-    document.querySelector('.search-go').click();
   })()`);
   let searchChanged = false;
   for (let i = 0; i < 60; i++) {
@@ -345,7 +369,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     if (t !== beforeSearch) { searchChanged = true; break; }
   }
   const titles = await evaluate('[...document.querySelectorAll(".card-title")].slice(0, 8).map(e => e.textContent.trim())');
-  const searchTotal = await evaluate('document.querySelector(".count") ? document.querySelector(".count").textContent : ""');
+  const searchTotal = await evaluate('document.querySelector(".result-count") ? document.querySelector(".result-count").textContent : ""');
   const hit = titles.some((t) => /初音|Miku|miku/.test(t));
   check('搜索触发刷新', searchChanged || hit, searchTotal);
   check('搜索结果与关键词相关', hit, titles.slice(0, 3).join(' / '));
@@ -370,13 +394,34 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // ---------- 9. 设置抽屉 ----------
   console.log('\n[9] 设置抽屉');
-  await evaluate('document.querySelector(".topbar-right .icon-btn").click()');
+  await evaluate('document.querySelector(".tb-right .ic-btn").click()');
   await waitFor('!!document.querySelector(".drawer")', 15000, '抽屉打开');
   const drawerText = await evaluate('document.querySelector(".drawer-body").textContent.replace(/\\s+/g, " ").trim().slice(0, 400)');
-  check('抽屉显示登录态', /已登录|未登录/.test(drawerText), drawerText.slice(0, 110));
-  check('抽屉显示网络信息', drawerText.includes('代理') || drawerText.includes('直连'), '');
+  check('抽屉显示登录态', /已登录|未登录|已失效/.test(drawerText), drawerText.slice(0, 110));
+  // 分区手风琴：先记下「网络」当前是否展开，点一下，再断言它翻转
+  const netBefore = await evaluate(`(() => {
+    const h = [...document.querySelectorAll('.acc-head')].find(b => b.textContent.includes('网络'));
+    return h ? h.getAttribute('aria-expanded') : 'n/a';
+  })()`);
+  await evaluate(`(() => {
+    const h = [...document.querySelectorAll('.acc-head')].find(b => b.textContent.includes('网络'));
+    if (h) h.click();
+  })()`);
+  await sleep(500);
+  const netAfter = await evaluate(`(() => {
+    const h = [...document.querySelectorAll('.acc-head')].find(b => b.textContent.includes('网络'));
+    const a = [...document.querySelectorAll('.acc-head')].find(b => b.textContent.includes('账号'));
+    return { net: h ? h.getAttribute('aria-expanded') : 'n/a', acc: a ? a.getAttribute('aria-expanded') : 'n/a' };
+  })()`);
+  check('分区可折叠/展开', netBefore !== 'n/a' && netAfter.net !== netBefore, netBefore + ' → ' + netAfter.net);
+  check('一次只展开一个分区', !(netAfter.net === 'true' && netAfter.acc === 'true'), '');
+  const netText = await evaluate(`(() => {
+    const b = [...document.querySelectorAll('.acc')].find(x => x.textContent.includes('网络'));
+    return b ? b.textContent : '';
+  })()`);
+  check('网络分区显示出口与 DNS', netText.includes('出口') && netText.includes('DNS'), netText.replace(/\\s+/g, ' ').slice(0, 90));
   await shot('07-cdp-settings.png');
-  await evaluate('document.querySelector(".drawer-head .close").click()');
+  await evaluate('document.querySelector(".drawer-head .btn").click()');
   await sleep(400);
 
   // ---------- 10. 范围收敛：只做创意工坊 ----------
@@ -393,12 +438,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   })()`);
   await sleep(2500);
 
-  const tabsNow = await evaluate(`[...document.querySelectorAll('.tabs .tab')].map(function (b) { return b.textContent.trim(); })`);
+  const tabsNow = await evaluate(`[...document.querySelectorAll('.segmented .seg')].map(function (b) { return b.textContent.trim(); })`);
   check('顶栏没有「我的订阅」Tab', tabsNow.indexOf('我的订阅') < 0, JSON.stringify(tabsNow));
   check('顶栏没有「我的收藏」Tab', tabsNow.indexOf('我的收藏') < 0, JSON.stringify(tabsNow));
-  check('顶栏保留「创意工坊」Tab', tabsNow.indexOf('创意工坊') >= 0, JSON.stringify(tabsNow));
+  check('顶栏保留「发现」Tab', tabsNow.indexOf('发现') >= 0, JSON.stringify(tabsNow));
 
-  // 切到「最近更新」再点回「创意工坊」，排序必须复位成 trend
+  // 切到「最近更新」再点回「发现」，排序必须复位成 trend
   await evaluate(`(() => {
     const sel = document.querySelector('.toolbar-right select');
     sel.value = 'lastupdated';
@@ -408,12 +453,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const sortBefore = await evaluate(`document.getElementById('app').__vue__.filters.sort`);
   check('已切到「最近更新」', sortBefore === 'lastupdated', sortBefore);
   await evaluate(`(() => {
-    const t = [...document.querySelectorAll('.tabs .tab')].find(b => b.textContent.trim() === '创意工坊');
+    const t = [...document.querySelectorAll('.segmented .seg')].find(b => b.textContent.trim() === '发现');
     if (t) t.click();
   })()`);
   await sleep(3500);
   const sortAfter = await evaluate(`document.getElementById('app').__vue__.filters.sort`);
-  check('点「创意工坊」后排序复位为 trend（BUG-04）', sortAfter === 'trend', sortAfter);
+  check('点「发现」后排序复位为 trend（BUG-04）', sortAfter === 'trend', sortAfter);
   await shot('08-cdp-browse-only.png');
 
   // ---------- 11. 错误汇总 ----------

@@ -140,10 +140,10 @@ function check(name, cond, extra) {
 
   /* ---------------- 顶栏：不再有订阅/收藏 Tab ---------------- */
   console.log('[顶栏导航]');
-  const tabs = await ev(`[...document.querySelectorAll('.tabs .tab')].map(function (b) { return b.textContent.trim(); })`);
+  const tabs = await ev(`[...document.querySelectorAll('.segmented .seg')].map(function (b) { return b.textContent.trim(); })`);
   check('没有「我的订阅」Tab', tabs.indexOf('我的订阅') < 0, JSON.stringify(tabs));
   check('没有「我的收藏」Tab', tabs.indexOf('我的收藏') < 0, JSON.stringify(tabs));
-  check('有「创意工坊」Tab', tabs.indexOf('创意工坊') >= 0, JSON.stringify(tabs));
+  check('有「发现」Tab', tabs.indexOf('发现') >= 0, JSON.stringify(tabs));
 
   /* ---------------- 每页条数 ---------------- */
   console.log('\n[每页条数 30 / 60 / 100]');
@@ -165,23 +165,23 @@ function check(name, cond, extra) {
 
   /* ---------------- 时间窗 ---------------- */
   console.log('\n[「最热门」的时间范围]');
+  // 时间窗已经和排序合成**同一个下拉**了（最热门 · 今日 / · 本周 / · 本月 / · 本年），
+  // 不再是原来那个独立的第二个 <select>。
   const dayOpts = await ev(`(() => {
-    const sel = [...document.querySelectorAll('.toolbar-right select')].find(function (s) {
-      return [...s.options].some(function (o) { return o.textContent.trim() === '今日'; });
-    });
-    return sel ? [...sel.options].map(function (o) { return o.textContent.trim(); }) : null;
+    const sel = document.querySelector('.toolbar-right select');
+    const all = sel ? [...sel.options].map(function (o) { return o.textContent.trim(); }) : null;
+    return all ? all.filter(function (t) { return t.indexOf('最热门') === 0; }) : null;
   })()`);
-  check('时间窗是 今日/本周/本月/本年',
-    JSON.stringify(dayOpts) === JSON.stringify(['今日', '本周', '本月', '本年']), JSON.stringify(dayOpts));
+  check('排序下拉里直接带出 今日/本周/本月/本年',
+    JSON.stringify(dayOpts) === JSON.stringify(['最热门 · 今日', '最热门 · 本周', '最热门 · 本月', '最热门 · 本年']),
+    JSON.stringify(dayOpts));
 
   const firstOf = () => ev(`(() => { const v = document.getElementById('app').__vue__; return v.items.length ? v.items[0].id : ''; })()`);
   const setDays = async (v) => {
     await applyAndWait(
       `(() => {
-        const sel = [...document.querySelectorAll('.toolbar-right select')].find(function (s) {
-          return [...s.options].some(function (o) { return o.textContent.trim() === '今日'; });
-        });
-        sel.value = '${v}';
+        const sel = document.querySelector('.toolbar-right select');
+        sel.value = 'trend:${v}';
         sel.dispatchEvent(new Event('change', { bubbles: true }));
       })()`
     );
@@ -191,7 +191,8 @@ function check(name, cond, extra) {
   const year = await setDays(365);
   check('切到「今日」有结果', !!today, String(today));
   check('切到「本年」有结果', !!year, String(year));
-  check('今日与本年不是同一批作品', today !== year, today + ' vs ' + year);  const daysState = await ev(`document.getElementById('app').__vue__.filters.days`);
+  check('今日与本年不是同一批作品', today !== year, today + ' vs ' + year);
+  const daysState = await ev(`document.getElementById('app').__vue__.filters.days`);
   check('filters.days 已更新为 365', daysState === 365, String(daysState));
   await setDays(7);
 
@@ -242,7 +243,8 @@ function check(name, cond, extra) {
 
   const rating = await ev(`(() => {
     const v = document.getElementById('app').__vue__;
-    const lit = document.querySelectorAll('.detail-rating .stars span.lit').length;
+    // 星星现在是 SVG（class="ic lit"），不再是 span.lit
+    const lit = document.querySelectorAll('.detail-rating .stars .ic.lit').length;
     return {
       lit: lit,
       label: (document.querySelector('.detail-rating .rating-label') || {}).textContent || '',
@@ -260,7 +262,7 @@ function check(name, cond, extra) {
   check('作者昵称不是"作者 xxxxxx"这种 ID 兜底（BUG-12）', !/^作者\s*\d+$/.test(authorName.trim()), authorName.trim());
 
   const moreHasCopy = await ev(`(() => {
-    const btn = [...document.querySelectorAll('.detail-actions .act')].find(function (b) { return b.textContent.trim() === '≡'; });
+    const btn = [...document.querySelectorAll('.detail-actions .btn')].find(function (b) { return b.getAttribute('aria-label') === '更多'; });
     if (!btn) return 'no-btn';
     btn.click();
     return new Promise(function (r) {
@@ -269,8 +271,8 @@ function check(name, cond, extra) {
       }, 120);
     });
   })()`);
-  check('「更多」菜单里有"复制作品链接"', /复制作品链接/.test(String(moreHasCopy)), String(moreHasCopy).slice(0, 80));
-  await ev(`(() => { const btn = [...document.querySelectorAll('.detail-actions .act')].find(function (b) { return b.textContent.trim() === '≡'; }); if (btn) btn.click(); })()`);
+  check('「更多」菜单里有"复制链接"', /复制链接/.test(String(moreHasCopy)), String(moreHasCopy).slice(0, 80));
+  await ev(`(() => { const btn = [...document.querySelectorAll('.detail-actions .btn')].find(function (b) { return b.getAttribute('aria-label') === '更多'; }); if (btn) btn.click(); })()`);
 
   /* ---------------- 隐藏 18+ ---------------- */
   console.log('\n[隐藏 18+ / 成人内容门控]');
@@ -282,16 +284,35 @@ function check(name, cond, extra) {
   check('默认列表里没有 Mature 作品', matureState.matureInList === 0, matureState.matureInList + ' / ' + matureState.n);
 
   // 取消勾选后应当能看到 Mature
+  // 注意：「隐藏成人内容」现在**只有筛选面板里那一份**（工具条上原来有一份重复的复选框，
+  // 已删）。这里点的是筛选面板里的那个开关，用 data-filter 定位而不是靠结构位置。
   const matureOn = await applyAndWait(
-    `(() => { const el = document.querySelector('.toolbar-right .chk'); if (el) el.click(); })()`
+    `(() => { const el = document.querySelector('.filters [data-filter="hideMature"] input'); if (el) el.click(); })()`
   );
   const matureCount = await ev(`document.getElementById('app').__vue__.items.filter(function (i) { return i.ageRating === 'Mature'; }).length`);
-  check('取消后能出现 Mature 作品', matureCount > 0, matureCount + ' 条（本页 ' + matureOn.n + ' 条）');
+  /*
+   * 这里**不**要求"这一页里必须出现 Mature"。
+   *
+   * 「最热门」是实时榜单，成人内容占比极低 —— 实测开/关这个开关时首页前 30 条里
+   * 都是 0 条 Mature（`GET /api/browse?sort=trend&days=7` 与带 `exclude=Mature` 的
+   * 两种情况，前 30 条的 Mature 数完全一样）。所以"翻到哪一页才有 Mature"是数据决定的，
+   * 界面控制不了，拿它当断言只会随机红。
+   *
+   * 界面真正要保证的是：开关关掉后**不再往查询里加 excludedtags[]=Mature**，
+   * 并且列表照常渲染。这两条下面各有一条断言。
+   */
+  check('关掉后列表照常渲染', matureOn.n > 0, matureOn.n + ' 条');
+  console.log('  · 这一页里的 Mature 数量：' + matureCount + '（实时榜单，与界面无关）');
+  const excludeClean = await ev(`(() => {
+    const v = document.getElementById('app').__vue__;
+    return { hide: v.filters.hideMature, exclude: (v.filters.exclude || []).indexOf('Mature') < 0 };
+  })()`);
+  check('关掉后不再排除 Mature', excludeClean.hide === false && excludeClean.exclude, JSON.stringify(excludeClean));
   const hideState = await ev(`document.getElementById('app').__vue__.filters.hideMature`);
   check('取消后 filters.hideMature = false', hideState === false, String(hideState));
   // 勾回来（还原初始状态）
   const matureOff = await applyAndWait(
-    `(() => { const el = document.querySelector('.toolbar-right .chk'); if (el) el.click(); })()`
+    `(() => { const el = document.querySelector('.filters [data-filter="hideMature"] input'); if (el) el.click(); })()`
   );
   const matureBack = await ev(`document.getElementById('app').__vue__.items.filter(function (i) { return i.ageRating === 'Mature'; }).length`);
   check('重新勾上后 Mature 又没了', matureBack === 0, matureBack + ' 条（本页 ' + matureOff.n + ' 条）');

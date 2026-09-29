@@ -2,9 +2,9 @@
  * 卡片右键菜单（对齐 WE 客户端的右键菜单）。
  *
  * 结构（与客户端一致）：
- *   订阅 / 添加到收藏
+ *   订阅 / 收藏 / 设为使用中
  *   ───────────
- *   在创意工坊中打开
+ *   在 Steam 中打开
  *   相关壁纸 ▸
  *   报告和阻止 ▸   （红色）
  *   ───────────
@@ -35,39 +35,43 @@ Vue.component('context-menu', {
     entries() {
       const it = this.item || {};
       const hasId = !!it.id;
+      // 作者名带上：不然看到两张壁纸分不清是不是同一个作者做的
+      // （用户原话："不然我都不知道两个壁纸是否属于同一个作者"）
+      const who = it.creatorName ? it.creatorName : '该作者';
       return [
         {
-          key: 'sub', icon: '⤓', label: this.subscribed ? '取消订阅' : '订阅',
+          key: 'sub', icon: this.subscribed ? 'i-check' : 'i-download', solid: !!this.subscribed,
+          label: this.subscribed ? '取消订阅' : '订阅',
           disabled: !hasId || this.busy,
         },
         {
-          key: 'fav', icon: this.favorited ? '♥' : '♡',
+          key: 'fav', icon: 'i-heart', solid: !!this.favorited,
           label: this.favorited ? '取消收藏' : '添加到收藏',
           disabled: !hasId || this.busy,
         },
         {
-          key: 'apply', icon: '▶',
-          label: this.current
-            ? '当前使用中（重新应用）'
-            : (this.canApply ? '设为使用中' : '设为使用中（需先订阅并下载）'),
+          key: 'apply', icon: 'i-play', solid: true,
+          label: this.current ? '重新设为使用中' : '设为使用中',
+          hint: this.canApply ? '' : '需先订阅并下载',
           disabled: !hasId || this.busy || !this.canApply,
         },
         { sep: true },
-        { key: 'workshop', icon: '🌐', label: '在创意工坊中打开', disabled: !hasId },
+        { key: 'workshop', icon: 'i-globe', label: '在 Steam 打开', disabled: !hasId },
         {
-          key: 'related', label: '相关壁纸', submenu: [
-            { key: 'author-all', label: '该作者的全部作品', disabled: !it.creator },
-            { key: 'author-steam', label: '在 Steam 里打开该作者的创意工坊', disabled: !it.creator },
-            { key: 'same-res', label: it.resolution ? ('只看 ' + tagLabel(it.resolution)) : '只看这个分辨率', disabled: !it.resolution },
-            { key: 'detail', label: '在右侧打开详情', disabled: !hasId },
+          key: 'related', icon: 'i-layers', label: '相关壁纸', submenu: [
+            { header: '作者：' + who },
+            { key: 'author-all', label: who + ' 的全部作品', disabled: !it.creator },
+            { key: 'author-steam', label: '在 Steam 打开「' + who + '」的创意工坊', disabled: !it.creator },
+            { key: 'same-res', label: it.resolution ? ('只看 ' + shortResolution(it.resolution)) : '只看这个分辨率', disabled: !it.resolution },
           ],
         },
         {
-          key: 'block', label: '报告和阻止', danger: true, submenu: [
-            { key: 'report', label: '在 Steam 中举报这个作品', disabled: !hasId },
+          key: 'block', icon: 'i-block', label: '报告和阻止', danger: true, submenu: [
+            { key: 'report', label: '在 Steam 中举报', disabled: !hasId },
             {
               key: 'block-author',
-              label: this.creatorBlocked ? '取消屏蔽该作者' : '屏蔽该作者（本地隐藏）',
+              label: this.creatorBlocked ? ('取消屏蔽「' + who + '」') : ('屏蔽「' + who + '」'),
+              hint: '只在本机生效',
               danger: !this.creatorBlocked,
               disabled: !it.creator,
             },
@@ -76,10 +80,10 @@ Vue.component('context-menu', {
         },
         { sep: true },
         {
-          key: 'view', label: '查看', submenu: [
+          key: 'view', icon: 'i-image', label: '查看', submenu: [
             { key: 'detail', label: '在右侧打开详情', disabled: !hasId },
             { key: 'copy-link', label: '复制作品链接', disabled: !hasId },
-            { key: 'steam-page', label: '在浏览器里打开 Steam 页面', disabled: !hasId },
+            { key: 'steam-page', label: '在浏览器中打开', disabled: !hasId },
           ],
         },
       ];
@@ -139,7 +143,7 @@ Vue.component('context-menu', {
       this.$emit('action', entry.key);
     },
     onSub(sub) {
-      if (sub.disabled) return;
+      if (sub.header || sub.disabled) return;
       this.$emit('action', sub.key);
     },
     openSub(key) {
@@ -157,16 +161,23 @@ Vue.component('context-menu', {
           <div v-if="e.sep" :key="'s' + i" class="cmenu-sep"></div>
           <div v-else :key="e.key + i" class="cmenu-row"
                :class="{ danger: e.danger, disabled: e.disabled, on: sub === e.key }"
+               :title="e.hint || ''"
                @click="onRow(e)" @mouseenter="e.submenu ? openSub(e.key) : closeSub()">
-            <span class="cmenu-ico">{{ e.icon || '' }}</span>
+            <span class="cmenu-ico">
+              <svg v-if="e.icon" class="ic" :class="{ solid: e.solid }"><use :href="'#' + e.icon"></use></svg>
+            </span>
             <span class="cmenu-label">{{ e.label }}</span>
-            <span v-if="e.submenu" class="cmenu-arrow">›</span>
-            <div v-if="e.submenu && sub === e.key" class="cmenu-sub"
-                 :class="{ flip: flipSub }">
-              <div v-for="(s, j) in e.submenu" :key="s.key + j" class="cmenu-row"
-                   :class="{ danger: s.danger, disabled: s.disabled }" @click.stop="onSub(s)">
-                <span class="cmenu-label">{{ s.label }}</span>
-              </div>
+            <svg v-if="e.submenu" class="ic tiny cmenu-arrow"><use href="#i-chev-right"></use></svg>
+            <div v-if="e.submenu && sub === e.key" class="cmenu-sub" :class="{ flip: flipSub }">
+              <template v-for="(s, j) in e.submenu">
+                <!-- 子菜单的标题行（例如作者名），不可点 -->
+                <div v-if="s.header" :key="'h' + j" class="cmenu-head">{{ s.header }}</div>
+                <div v-else :key="s.key + j" class="cmenu-row"
+                     :class="{ danger: s.danger, disabled: s.disabled }" :title="s.hint || ''"
+                     @click.stop="onSub(s)">
+                  <span class="cmenu-label">{{ s.label }}</span>
+                </div>
+              </template>
             </div>
           </div>
         </template>

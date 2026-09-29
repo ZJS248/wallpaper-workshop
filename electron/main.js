@@ -27,9 +27,11 @@ const PROJECT = path.resolve(__dirname, '..');
  * 打包后 electron/ 在 app.asar 里，而 `nativeImage.createFromPath` **不支持 asar 路径**
  * （它不走 Electron patch 过的 fs），直接用文件路径会得到一张空图 —— 表现是托盘没图标。
  * 所以：先试文件（开发态），失败或为空就用内嵌这份 64×64 PNG。
+ *
+ * 这份 base64 由 `node scripts/make-icons.js` 生成，与 electron/tray.png 同源。
  */
 const TRAY_PNG_BASE64 =
-  'iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAABGElEQVR4nO3bS07DMBhF4ZujzGFNsB1YDWwH1lRWAFJHVZWA86qxT79JlMiO/2s7k0hO7tyGJY0fXj6+04Cv9+fiXENPwddMxNBj8CUTQe/h/8rC0g6tmstEacMeTGUjclhWfy4jkcO0+lNZiRyRI3JEjsgROSJH5MatLzi9PZ2vj6+fxW33VDLuYTvgdECgW9dArYH3tKWW8T8UUdO457fX4iQQuXFtxxZXewqRI3JEjsgROSJH5IgckSNyRI7IETkiR+So9Td2T1tqodbAe9law1i7gNqIHJEjckSOyBE5IkfkWHPMpHWXWYkclzeGXXCdkchx/aDnXTCVjdKGrZvLxNIOLfoty1DyAu3ByVYnoqfde5eD/QDfg1ZDPnlIkAAAAABJRU5ErkJggg==';
+  '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';
 const PORT = Number(process.env.WW_PORT || 9391);
 const BASE = 'http://127.0.0.1:' + PORT;
 /** 登录时自启的实例带 --hidden：只驻留托盘，不弹窗打扰 */
@@ -134,12 +136,25 @@ function createWindow() {
   win = new BrowserWindow({
     width: 1500,
     height: 950,
-    minWidth: 720,
-    minHeight: 520,
-    title: '创意工坊 · Wallpaper Engine',
-    backgroundColor: '#0e1621',
+    minWidth: 860,
+    minHeight: 580,
+    title: '创意工坊',
+    backgroundColor: '#0f151c',
     autoHideMenuBar: true,
     show: false,
+    /*
+     * 去掉原生标题栏：页面里的顶栏就是窗口标题栏。
+     *
+     * 之前是「原生标题栏 + 页面顶栏」两层头，垂直空间白扔 30 多 px，
+     * 而且两者的标题文字重复。这里用 titleBarStyle:'hidden' 让页面顶栏顶到最上面，
+     * 再用 titleBarOverlay 把**系统窗口按钮**（最小化/最大化/关闭）画在我们顶栏的右上角 ——
+     * 按钮仍然由系统绘制与处理命中测试，我们不需要自绘拖拽区与按钮。
+     *
+     * 页面侧配合：<html class="desktop"> 时 .titlebar 预留 148px 的按钮区。
+     */
+    titleBarStyle: 'hidden',
+    titleBarOverlay: { color: '#0b1016', symbolColor: '#c6d0da', height: 40 },
+    icon: path.join(PROJECT, 'electron', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -159,6 +174,17 @@ function createWindow() {
     if (!quitting) {
       e.preventDefault();
       win.hide();
+    }
+  });
+
+  /*
+   * 桌面壳不该变成浏览器：窗口内只允许停留在本地 origin，
+   * 任何外链（Steam 页面、举报页…）一律交给系统浏览器。
+   */
+  win.webContents.on('will-navigate', (e, url) => {
+    if (url.indexOf(BASE) !== 0) {
+      e.preventDefault();
+      if (/^https?:/.test(url)) shell.openExternal(url);
     }
   });
 
@@ -198,8 +224,7 @@ function buildTrayMenu() {
     { label: '打开数据目录', click: () => shell.openPath(app.getPath('userData')) },
     { label: '重新加载页面', click: () => win && !win.isDestroyed() && win.webContents.reload() },
     { type: 'separator' },
-    { label: '退出', click: () => { quitting = true; app.quit(); } },
-  ]);
+    { label: '退出', click: () => { quitting = true; app.quit(); } },  ]);
 }
 
 function refreshTray() {
@@ -216,7 +241,7 @@ function createTray() {
   }
   if (img.isEmpty()) img = nativeImage.createFromDataURL('data:image/png;base64,' + TRAY_PNG_BASE64);
   tray = new Tray(img);
-  tray.setToolTip('创意工坊 · Wallpaper Engine');
+  tray.setToolTip('创意工坊');
   tray.on('click', showWindow);
   refreshTray();
   tray.setContextMenu(buildTrayMenu());
@@ -243,6 +268,13 @@ ipcMain.handle('ww:info', () => ({
 }));
 
 /* ------------------------------ 生命周期 ------------------------------ */
+
+/*
+ * Windows 任务栏的图标与分组靠 AppUserModelID 认，没有它会出现
+ * "图标是 Electron 默认的、每开一个窗口多一个分组"。
+ * 必须在 app ready 之前设置，所以放在生命周期之外。
+ */
+app.setAppUserModelId('com.zjs248.wallpaperworkshop');
 
 // 第二个实例：把已有窗口叫出来，不重复开
 if (!app.requestSingleInstanceLock()) {

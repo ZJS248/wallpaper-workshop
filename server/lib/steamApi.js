@@ -292,13 +292,29 @@ const MERGE_CONCURRENCY = 12;   // = MERGE_MAX_VALUES：9~12 路一波打完，�
 /** 合并路数上限：超过就截断并告知前端（避免"全选 24 个分辨率"打出 24 个请求） */
 const MERGE_MAX_VALUES = 12;
 /**
- * 归并查询时，每条路最多取几个上游页。
+ * 归并前缀（merged prefix）能长到多深 —— 单位是**每路**的条数。
  *
- * 要保证"全局第 N 条"正确，每条路就得取前 N 条；N 越大请求越多。
- * 3 页 = 每路最多 90 条 → 每页 30 条时前 3 页顺序与原站完全一致；
- * 再深的页退回轮询合并（结果仍然正确、顺序近似），并发上限由 MERGE_CONCURRENCY 兜住。
+ * 背景（真实 bug，用户实测"最近"排序时第 2 页和第 7 页出现同一张壁纸）：
+ * 旧实现用 `MERGE_SORTED_MAX_UPSTREAM_PAGES = 4` 卡深度：
+ *   页码 ≤ 4 → 每路取 `page*pageSize` 条，**按排序键归并**（顺序与原站一致）
+ *   页码 > 4 → 每路只取 `prefix` 条，**改用轮询合并**（roundrobin）
+ * 这不是"顺序近似"，而是**换了数据集**：第 5 页往后每路取的是
+ * `[(page-1)*prefix, page*prefix)` 这种下标窗口，和前 4 页的"每路前 N 条"毫无关系，
+ * 于是第 2 页（sorted）和第 7 页（roundrobin）必然交叉。
+ * 实测：10 页 300 个格子里只有 255 个不重复作品，**每一处重复都是 sorted × approx**。
+ *
+ * 现在改成：只要排序有归并键，就**始终**从同一条"归并后的有序列表"里切页。
+ * 这条列表按需增长并缓存，所以顺序永远自洽，第 N 页不会和第 M 页交叉。
+ * 增长是**增量**的 —— 从第 P-1 页翻到第 P 页，每路只多取**一个**上游页。
+ *
+ * 上限存在的理由是延迟：跳到很深的页仍要给每路取那么多条。
+ * 1200 条 = 40 个上游页/路，6 路共 240 个请求，冷启动会很慢。
+ * 超过这个深度就退回轮询合并（并在 mergeMode 里标明），那属于极端翻页。
  */
-const MERGE_SORTED_MAX_UPSTREAM_PAGES = 4;
+const MERGE_PREFIX_MAX_ITEMS = 1200;
+/** 归并前缀状态的存活时间与条数上限（和 pageStore 的上游页缓存同一量级） */
+const MERGE_STATE_TTL_MS = 3 * 60 * 1000;
+const MERGE_STATE_MAX = 24;
 /** 组装一个"每页 N 条"的页时，最多并发打几个上游页 */
 const ASSEMBLE_CONCURRENCY = 4;
 /** GetPublishedFileDetails 的重试次数（noLimit 链路没有内置重试） */
@@ -322,35 +338,123 @@ const MERGE_KEYS = {
   toprated: { exact: false, key: (it) => Number(it.starRating) || 0 },
 };
 
+/* ------------------------------------------------------------------ *
+ * 归并前缀状态：让每一页都来自**同一条**有序列表
+ * ------------------------------------------------------------------ */
+
+const MERGE_STATES = new Map(); // key -> { at, state }
+
+/** 取出（或新建）某个筛选组合的归并前缀状态 */
+function mergeStateGet(key) {
+  const hit = MERGE_STATES.get(key);
+  if (hit) {
+    if (Date.now() - hit.at > MERGE_STATE_TTL_MS) {
+      MERGE_STATES.delete(key);
+    } else {
+      MERGE_STATES.delete(key);
+      MERGE_STATES.set(key, hit);   // LRU
+      return hit.state;
+    }
+  }
+  const state = {
+    need: 0,            // 这份 order 是按"每路前 need 条"算出来的
+    order: [],           // 归并后的有序列表
+    totalSum: 0,
+    requests: 0,
+    upstreamPages: 0,
+  };
+  MERGE_STATES.set(key, { at: Date.now(), state });
+  while (MERGE_STATES.size > MERGE_STATE_MAX) {
+    MERGE_STATES.delete(MERGE_STATES.keys().next().value);
+  }
+  return state;
+}
+
 /**
- * k 路归并：把每条路各自的"前 N 条"按排序键合成一个全局有序列表，再切出当前页。
+ * 按当前排序键做 k 路归并，得到一条全局有序列表。
  *
- * 为什么这样能对上原站：每条路本身已是该排序下的有序序列，
- * 全局前 N 条不可能从任何一路取超过 N 条 —— 所以每路取前 N 条再归并，
- * 得到的顺序和"一个真的能表达组内 OR 的接口"返回的顺序一致。
+ * 次级键（评价数 → 订阅数 → id）保证同一键值下顺序稳定。
+ * 同一个键值内部靠 id 兜底，是因为评价数/订阅数在两次请求之间会变，
+ * 只用它们排序会让同一批条目在两次归并里位置飘移。
  */
-function mergeBySortKey(slices, keyOf, page, pageSize) {
+function mergeSorted(routes, keyOf) {
   const seen = new Set();
   const all = [];
-  slices.forEach((s) =>
-    (s || []).forEach((it) => {
-      if (!it || it.id === undefined || seen.has(it.id)) return;
+  for (const r of routes) {
+    for (const it of r) {
+      if (!it || it.id === undefined || seen.has(it.id)) continue;
       seen.add(it.id);
       all.push(it);
-    })
-  );
+    }
+  }
   all.sort((a, b) => {
     const d = keyOf(b) - keyOf(a);
     if (d) return d;
-    // 次级键：评价数 → 订阅数 → id，保证同一键值下顺序稳定（翻页不会跳）
     const dv = (Number(b.totalVotes) || 0) - (Number(a.totalVotes) || 0);
     if (dv) return dv;
     const ds = (Number(b.subscriptions) || 0) - (Number(a.subscriptions) || 0);
     if (ds) return ds;
-    return String(b.id).localeCompare(String(a.id));
+    return String(a.id).localeCompare(String(b.id));
   });
-  const from = (page - 1) * pageSize;
-  return all.slice(from, from + pageSize);
+  return all;
+}
+
+/**
+ * 算出（或复用）"每路前 need 条"得到的全局有序列表。
+ *
+ * `keyOf` 为 null 时**保持上游顺序**（不排序）—— 这就是没有多选类目时的情况：
+ * 上游那一路本身就是按当前排序排好的，拼接即可。
+ * 给 keyOf 时按归并键排序（多选类目的"组内 OR"）。
+ *
+ * 关键点：**每次都重新取整段前缀**（而不是只把新增的那一段追加进来）。
+ *
+ * 追加的做法对"最近 / 最近更新"没问题（timeCreated 不可变，新取到的必然更旧，
+ * 只会排在后面），但对"评分最高 / 订阅最多"就不行：新取到的条目会插到列表中间，
+ * 把已经发出去的页整体往下顶。整段重取则保证**所有页看到的前缀数据完全相同**
+ * （同一批 URL，pageStore 的 LRU 返回同一份对象），归并结果也就确定。
+ *
+ * ⚠️ 但这只能保证"排序键是不可变的位置键"的情况（mostrecent / lastupdated /
+ *    不排序的普通路径）。键本身不是位置键时（toprated 的星级、mostsubscribed 的
+ *    订阅数——Steam 的真实排序另有加权，我们拿不到），"全局第 N 名"会随着
+ *    挖得更深而真的改变，翻页交叉无法完全消除，只能靠前端去重兜底。
+ *
+ * 代价是重复计算，但绝大多数是 LRU 命中：顺序翻页时第 P 页相对第 P-1 页
+ * 每路只多一个上游页没缓存。
+ */
+async function buildMergeOrder(state, need, keyOf, ctx) {
+  const want = Math.min(need, MERGE_PREFIX_MAX_ITEMS);
+  if (state.need >= want && state.order.length) return state;
+
+  const res = await mapLimit(ctx.values, MERGE_CONCURRENCY, (v) =>
+    ctx.runQuery(ctx.andTagsAll.concat(v ? [v] : []), 0, want, { noLimit: true })
+  );
+
+  const ok = res.filter((r) => r && r.ok);
+  if (!ok.length) {
+    const first = res.find(Boolean) || {};
+    return { failed: first.reason || '合并查询全部失败' };
+  }
+
+  const routes = ok.map((r) => r.items || []);
+  if (keyOf) {
+    state.order = mergeSorted(routes, keyOf);
+  } else {
+    const seen = new Set();
+    const all = [];
+    for (const r of routes) {
+      for (const it of r) {
+        if (!it || it.id === undefined || seen.has(it.id)) continue;
+        seen.add(it.id);
+        all.push(it);
+      }
+    }
+    state.order = all;   // 保持上游顺序
+  }
+  state.need = want;
+  state.requests += ok.length;
+  state.upstreamPages += ok.reduce((a, r) => a + (r.upstreamPages || 0), 0);
+  state.totalSum = ok.reduce((a, r) => Math.max(a, r.totalCount || 0), 0);
+  return state;
 }
 
 /**
@@ -513,16 +617,37 @@ async function queryWorkshop(params, ctx) {
 
   // ---- 情况 1：没有多选类目（每个类目只勾了一个）→ 一条查询链搞定 ----
   if (!orValues.length) {
-    const res = await runQuery(andTagsAll, baseStart, pageSize);
-    const built = buildResult(res, {
-      sort: sort,
-      days: common.days,
-      page: page,
-      pageSize: pageSize,
-      search: common.search,
-      requests: res.upstreamPages || 1,
-      droppedFullGroups: droppedFullGroups,
+    /*
+     * 同样走"冻结前缀"。
+     *
+     * 「最近」是按发布时间倒序的实时列表，而第 N 页 = 上游第 N 页；
+     * 上游每翻一页都是**当下**的榜单，于是新发布的壁纸会把后面的整体前移，
+     * 第 2 页和第 7 页就有交集（实测 8 页里有 4 条重复）。
+     * 把前 N 条冻结成一份（按需增长、LRU 命中保证各页看到同一份数据）之后就自洽了。
+     */
+    const state = mergeStateGet('S:' + cacheKey);
+    const res = await buildMergeOrder(state, page * pageSize, null, {
+      values: [null],
+      andTagsAll,
+      runQuery,
     });
+    if (res && res.failed) {
+      return { ok: false, reason: res.failed, items: [] };
+    }
+    const from = baseStart;
+    const slice = state.order.slice(from, from + pageSize);
+    const built = buildResult(
+      { ok: true, items: slice, totalCount: state.totalSum, urls: [], upstreamPages: state.need ? Math.ceil(state.need / pageStore.UPSTREAM_PAGE_SIZE) : 1 },
+      {
+        sort: sort,
+        days: common.days,
+        page: page,
+        pageSize: pageSize,
+        search: common.search,
+        requests: state.need ? Math.ceil(state.need / pageStore.UPSTREAM_PAGE_SIZE) : 1,
+        droppedFullGroups: droppedFullGroups,
+      }
+    );
     if (built.ok) mergeCacheSet(cacheKey, built);
     return built;
   }
@@ -536,28 +661,83 @@ async function queryWorkshop(params, ctx) {
   /*
    * 两种合并方式：
    *
-   *  1) sorted（默认，也是"和 WE 客户端一致"的那种）
-   *     按当前排序的键做 **k 路归并**：要拿全局第 (page-1)*pageSize+1 … page*pageSize 条，
-   *     每条路取自己前 page*pageSize 条就够（全局前 N 条不可能从任何一路取超过 N 条），
-   *     再按排序键归并、切片。这样"最近"的第一页就是全站最新的 30 条，
-   *     与客户端/原站一致（旧实现按 pageSize/路数 各取一小段再轮询，
-   *     会把很旧的作品塞进第一页 —— 用户报的"结果和排序不一样"就是这个）。
+   *  1) sorted（有归并键的排序：最近 / 最近更新 / 订阅最多 / 评分最高）
+   *     从**一条持续增长的有序列表**里切页：这条列表 = 各路前缀按排序键归并的结果。
+   *     因为所有页都出自同一条列表，顺序天然自洽，任意两页都不会交叉。
+   *     列表按需增长（相对上一页每路只多取一个上游页），并按筛选组合缓存。
+   *     ⚠️ 早先这里是"每路取 page*pageSize 再归并，深翻页就退回轮询"，
+   *        而轮询取的是**另一批数据**（每路一个下标窗口），于是第 2 页和第 7 页会撞车。
    *
-   *     代价：每页每路要 page*pageSize/30 个上游页；太深的页会把请求数放大到不可用，
-   *     所以有 MERGE_SORTED_MAX_UPSTREAM_PAGES 上限，超了退回轮询（并标记 mergeMode=approx）。
-   *
-   *  2) roundrobin（最热门 / 深翻页）
+   *  2) roundrobin（最热门）
    *     trend 没有可比的数值键（Steam 不公开热度分），只能维持"每路取一小段再轮流取"。
+   *     这条路是自洽的：每路取的是 [(page-1)*prefix, page*prefix)，互不重叠。
    */
   const mergeKey = MERGE_KEYS[sort] || null;
   const keyOf = mergeKey ? mergeKey.key : null;
   const needPerRoute = page * pageSize;
   const perRoutePages = Math.max(1, Math.ceil(needPerRoute / pageStore.UPSTREAM_PAGE_SIZE));
-  const exact = !!keyOf && perRoutePages <= MERGE_SORTED_MAX_UPSTREAM_PAGES;
 
+  /** 一个值是否命中每一个多选类目组（复查用；沿用旧口径，不改变既有行为） */
+  const hitsGroups = (it) => rawGroups.every((g) => g.some((t) => (it.tags || []).includes(t)));
+
+  if (keyOf && mergeKey.exact) {
+    /* ---- 排序键是不可变的位置键：始终从同一条有序列表切页 ---- */
+    const stateKey = 'P:' + cacheKey;
+    const state = mergeStateGet(stateKey);
+    const res = await buildMergeOrder(state, needPerRoute, keyOf, { values, andTagsAll, runQuery });
+    if (res && res.failed) {
+      return { ok: false, reason: res.failed, items: [] };
+    }
+    if (!state.order.length) {
+      return { ok: false, reason: '合并查询全部失败', items: [] };
+    }
+
+    const from = (page - 1) * pageSize;
+    let mergedItems = state.order.slice(from, from + pageSize);
+
+    // 复查：剔除没有命中全部多选类目的条目（与旧实现口径一致）
+    const before = mergedItems.length;
+    mergedItems = mergedItems.filter(hitsGroups);
+
+    const multiGroup = rawGroups.filter((g) => g.length > 1).length > 1;
+    const totalSum = state.totalSum;
+    const built = {
+      ok: true,
+      url: '',
+      urls: [],
+      sort: sort,
+      sortLabel: SORTS[sort] ? SORTS[sort].label : sort,
+      page: page,
+      pageSize: pageSize,
+      totalCount: totalSum,
+      totalCountApprox: multiGroup || sort === 'trend',
+      totalCountNote: totalCountNote(sort, multiGroup),
+      totalPages: pageStore.totalPagesFor(totalSum, pageSize),
+      cappedAt: pageStore.MAX_ITEMS,
+      merged: true,
+      mergeMode: mergeKey.exact ? 'sorted' : 'sorted_approx',
+      mergePerRoute: state.need,
+      mergePerRoutePages: perRoutePages,
+      droppedFullGroups: droppedFullGroups,
+      mergeRequests: state.requests,
+      mergeUpstreamPages: state.upstreamPages,
+      mergedGroups: rawGroups,
+      mergedValues: values,
+      mergeTruncated: truncated,
+      mergeMaxValues: MERGE_MAX_VALUES,
+      mergePrefix: state.need,
+      searchNote: searchNote(common.search),
+      items: mergedItems,
+      mergeFiltered: before - mergedItems.length,
+    };
+    mergeCacheSet(cacheKey, built);
+    return built;
+  }
+
+  /* ---- 没有可用的位置键：每页各自算（前缀会随挖深而真的改变，交叉只能靠前端去重） ---- */
   const prefix = Math.max(1, Math.ceil(pageSize / values.length));
-  const perStart = exact ? 0 : (page - 1) * prefix;
-  const perCount = exact ? needPerRoute : prefix;
+  const perStart = keyOf ? 0 : (page - 1) * prefix;
+  const perCount = keyOf ? needPerRoute : prefix;
 
   const results = await mapLimit(values, MERGE_CONCURRENCY, (v) =>
     runQuery(andTagsAll.concat([v]), perStart, perCount, { noLimit: true })
@@ -570,15 +750,13 @@ async function queryWorkshop(params, ctx) {
   }
 
   // 复查：每个结果项必须命中**每一个**多选类目组里的至少一个值
-  const slices = okResults.map((r) =>
-    (r.items || []).filter((it) => rawGroups.every((g) => g.some((t) => (it.tags || []).includes(t))))
-  );
+  const slices = okResults.map((r) => (r.items || []).filter(hitsGroups));
   const totalSum = okResults.reduce((a, r) => a + (r.totalCount || 0), 0);
   // 只有一个多选类目时，各路结果天然互斥（每个值只属于一个类目），总数是准确的；
   // 多个多选类目时各路之间可能有重复项，相加只是上界。
   const multiGroup = rawGroups.filter((g) => g.length > 1).length > 1;
 
-  const mergedItems = exact ? mergeBySortKey(slices, keyOf, page, pageSize) : interleave(slices, pageSize);
+  const mergedItems = keyOf ? mergeSorted(slices, keyOf).slice((page - 1) * pageSize, page * pageSize) : interleave(slices, pageSize);
 
   const built = {
     ok: true,
@@ -595,8 +773,9 @@ async function queryWorkshop(params, ctx) {
     totalPages: pageStore.totalPagesFor(totalSum, pageSize),
     cappedAt: pageStore.MAX_ITEMS,
     merged: true,
-    // sorted = 与客户端同序；approx = 深翻页退化成轮询；roundrobin = 最热门（无法归并）
-    mergeMode: exact ? (mergeKey.exact ? 'sorted' : 'sorted_approx') : keyOf ? 'approx' : 'roundrobin',
+    // roundrobin = 最热门（没有可比的数值键）；sorted_approx = 键不是位置键
+    // （评分最高 / 订阅最多），每页各自算，翻页可能有少量交叉，靠前端去重兜底
+    mergeMode: keyOf ? 'sorted_approx' : 'roundrobin',
     mergePerRoute: perCount,
     mergePerRoutePages: perRoutePages,
     droppedFullGroups: droppedFullGroups,
@@ -763,6 +942,8 @@ async function getDetails(ids, ctx) {
         total_votes: d.total_votes,
         vote_data: d.vote_data,
         file_type: d.file_type,
+        // 依赖的子项目（预设/场景依赖另一个壁纸）。只有这个接口会返回它
+        children: d.children,
         previews: (d.previews || []).map((p) => ({
           url: p.url,
           preview_type: p.preview_type,
@@ -892,6 +1073,8 @@ async function getItemDetail(opts, ctx) {
     ok: true,
     id,
     url: d.url,
+    // 「必需物品」：这件壁纸依赖的其它创意工坊项目（只订阅它是加载不出来的）
+    requiredItems: d.requiredItems || [],
     item,
     // 详情页专有
     pageOk: !!d.ok,

@@ -3,147 +3,210 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Wallpaper Engine 创意工坊 · wallpaper-workshop</title>
+<title>创意工坊</title>
 <link rel="stylesheet" href="/src/app.css">
+<script>
+  /*
+   * 桌面壳（Electron）里 preload 同步注入了 window.WWDesktop。
+   * 必须在首次渲染前给 <html> 打标记：CSS 靠它决定要不要给系统窗口按钮留位置，
+   * 放在这里而不是等 Vue 挂载，是为了避免顶栏宽度闪一下。
+   */
+  if (window.WWDesktop && window.WWDesktop.isDesktop) {
+    document.documentElement.classList.add('desktop');
+  }
+</script>
 </head>
 <body>
 
+<!--
+  ============================================================================
+  图标精灵（16px 描边图标，Feather 风格）
+  为什么内联在 HTML 里而不是用图标字体 / 外部文件：
+  项目没有构建步骤、不引第三方依赖，内联能保证首屏零闪烁、离线可用。
+  用法：<svg class="ic"><use href="#i-search"></use></svg>
+  ============================================================================
+-->
+<svg class="sprite" aria-hidden="true" focusable="false"><defs>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20.5 20.5l-4.2-4.2"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></symbol>
+  <symbol id="i-reset" viewBox="0 0 24 24"><path d="M1 4v6h6"/><path d="M3.5 15a9 9 0 1 0 2.1-9.4L1 10"/></symbol>
+  <symbol id="i-chev-down" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
+  <symbol id="i-chev-left" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></symbol>
+  <symbol id="i-chev-right" viewBox="0 0 24 24"><path d="M9 18l6-6-6-6"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></symbol>
+  <symbol id="i-star" viewBox="0 0 24 24"><path d="M12 2.5l2.9 5.9 6.6 1-4.8 4.6 1.2 6.5-5.9-3.1-5.9 3.1 1.2-6.5L2.5 9.4l6.6-1z"/></symbol>
+  <symbol id="i-heart" viewBox="0 0 24 24"><path d="M20.8 5.6a5.5 5.5 0 0 0-7.8 0L12 6.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8l1.1 1.1L12 22.2l7.8-7.7 1.1-1.1a5.5 5.5 0 0 0-.1-7.8z"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M6 4l13 8-13 8z"/></symbol>
+  <symbol id="i-external" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6M10 14L21 3"/></symbol>
+  <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5M12 15V3"/></symbol>
+  <symbol id="i-user" viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 3.5 9A14 14 0 0 1 12 21a14 14 0 0 1-3.5-9A14 14 0 0 1 12 3z"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></symbol>
+  <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.2 9.2a3 3 0 0 1 5.8 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></symbol>
+  <symbol id="i-filter" viewBox="0 0 24 24"><path d="M21 4H3l7.2 8.5V19l3.6 2v-8.5z"/></symbol>
+  <symbol id="i-inbox" viewBox="0 0 24 24"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5.1L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.5-6.9A2 2 0 0 0 16.8 4H7.2a2 2 0 0 0-1.7 1.1z"/></symbol>
+  <symbol id="i-arrow-left" viewBox="0 0 24 24"><path d="M19 12H5M12 19l-7-7 7-7"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/></symbol>
+  <symbol id="i-block" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></symbol>
+  <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.5.5l3-3A5 5 0 0 0 13.4 3.4l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7.1 7.1l1.7-1.7"/></symbol>
+  <symbol id="i-thumb-up" viewBox="0 0 24 24"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.3a2 2 0 0 0 2-1.7l1.4-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"/></symbol>
+  <symbol id="i-thumb-down" viewBox="0 0 24 24"><path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.7a2 2 0 0 0-2 1.7l-1.4 9a2 2 0 0 0 2 2.3zM17 22h3a2 2 0 0 0 2-2v-7a2 2 0 0 0-2-2h-3"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M22 4v6h-6M2 20v-6h6"/><path d="M4.6 9a8 8 0 0 1 13.2-3L22 10M2 14l4.2 4a8 8 0 0 0 13.2-3"/></symbol>
+  <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></symbol>
+  <symbol id="i-tag" viewBox="0 0 24 24"><path d="M20.6 13.4l-7.2 7.2a2 2 0 0 1-2.8 0L2 12V2h10l8.6 8.6a2 2 0 0 1 0 2.8z"/><path d="M7 7h.01"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/></symbol>
+  <symbol id="i-box" viewBox="0 0 24 24"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/></symbol>
+  <symbol id="i-book" viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></symbol>
+</defs></svg>
+
 <div id="app" v-cloak>
+
   <!-- ============================ 顶栏 ============================ -->
-  <header class="topbar">
+  <!--
+    桌面壳用 titleBarStyle:'hidden'，这一条就是窗口标题栏，所以整条都是拖拽区
+    （-webkit-app-region: drag 写在 CSS 里，按钮/输入框在 CSS 里标 no-drag）。
+    浏览器直接访问时没有窗口按钮，CSS 不会留那条空隙。
+  -->
+  <header class="titlebar">
     <div class="brand">
-      <span class="brand-ico">🖼</span>
-      <span class="brand-text">Wallpaper Engine</span>
-      <span class="brand-tag">创意工坊 · 网页版</span>
+      <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="2" y="3" width="20" height="15" rx="2.5"/>
+        <circle cx="16.8" cy="7.6" r="1.7"/>
+        <path d="M2.5 15.5l5.6-5.2 3.9 3.6 3.2-2.8 6.3 5.9"/>
+      </svg>
+      <span class="brand-text">创意工坊</span>
     </div>
 
-    <nav class="tabs">
-      <button class="tab" :class="{ on: mode === 'browse' }" @click="backToBrowse">创意工坊</button>
-      <button class="tab" v-if="mode === 'author'" class="on" @click="backToBrowse">作者作品</button>
-      <button class="tab" :class="{ on: mode === 'subscribed' }" @click="openSubscribed">已订阅</button>
+    <nav class="segmented" role="tablist">
+      <button class="seg" :class="{ on: mode === 'browse' }" role="tab"
+              :aria-selected="String(mode !== 'subscribed')" @click="backToBrowse">发现</button>
+      <button class="seg" v-if="mode === 'author'" role="tab" aria-selected="true" @click="backToBrowse">作者作品</button>
+      <button class="seg" :class="{ on: mode === 'subscribed' }" role="tab"
+              :aria-selected="String(mode === 'subscribed')" @click="openSubscribed">已订阅</button>
     </nav>
 
-    <div class="topbar-right">
-      <span class="conn" :class="loginState === 'ok' ? 'ok' : (loginState === 'invalid' ? 'warn' : 'off')"
-            :title="loginTitle">
+    <div class="tb-right">
+      <button class="status-pill" :class="loginState" :title="loginTitle" @click="openSettings('account')">
         <span class="dot"></span>{{ loginText }}
-      </span>
-      <span class="conn" :class="status && status.dns && status.dns.poisoned ? 'warn' : 'ok'"
-            :title="'出口：' + ((status && status.proxy) || '直连') + '　DoH：' + ((status && status.dns && status.dns.doh) || []).join(', ')">
-        <span class="dot"></span>{{ status && status.proxy ? '代理' : '直连' }}
-      </span>
-      <button class="icon-btn" title="设置 / 登录" @click="settingsOpen = true">⚙</button>
+      </button>
+      <button class="ic-btn" title="设置" aria-label="设置" @click="openSettings()">
+        <svg class="ic"><use href="#i-sliders"></use></svg>
+      </button>
     </div>
   </header>
 
   <!-- ==================== 搜索 + 排序 工具条 ==================== -->
-  <!-- 工具条属于「创意工坊」浏览视图；已订阅视图有自己的搜索/排序条 -->
+  <!-- 工具条属于「发现」视图；已订阅视图有自己的搜索/排序条 -->
   <div class="toolbar" v-if="mode !== 'subscribed'">
     <div class="search">
-      <span class="search-ico">🔍</span>
-      <input v-model="searchInput" type="text" placeholder="搜索创意工坊（标题 / 描述）"
-             @input="onSearchInput" @keyup.enter="submitSearch">
-      <button v-if="filters.search" class="search-clear" @click="clearSearch" title="清除搜索">✕</button>
-      <button class="search-go" @click="submitSearch">搜索</button>
+      <svg class="ic search-ic"><use href="#i-search"></use></svg>
+      <input v-model="searchInput" type="text" placeholder="搜索标题或作者"
+             aria-label="搜索创意工坊" @input="onSearchInput" @keyup.enter="submitSearch">
+      <button v-if="filters.search" class="search-clear" title="清除搜索" aria-label="清除搜索"
+              @click="clearSearch">
+        <svg class="ic"><use href="#i-x"></use></svg>
+      </button>
     </div>
 
-    <div class="toolbar-mid">
-      <span class="filter-badge" v-if="hasAnyFilter" @click="resetFilters" title="点击重置全部筛选">
-        筛选结果（已筛选） ✕
-      </span>
-      <span class="count" v-if="totalCount" :class="{ 'count-note': !!countNote }" :title="countNote">
-        共 {{ fmtCount(totalCount) }}{{ totalCountApprox ? '（约）' : '' }} 个作品
-      </span>
-      <span class="merge-note" v-if="mergeInfo" :title="mergeInfo.title">{{ mergeInfo.text }}</span>
-      <span class="merge-note" v-if="subsError" :title="subsError" style="color:var(--warn)">Steam 订阅列表取不到（登录态过期？），角标已改用本地库</span>
+    <span class="result-count" v-if="totalCount" :class="{ approx: !!countNote }" :title="countNote">
+      共 {{ fmtCount(totalCount) }} 个作品
+      <svg class="ic tiny" v-if="countNote"><use href="#i-info"></use></svg>
+    </span>
+
+    <!-- 被统一提示条压下去的说明，收到这个芯片里 -->
+    <div class="more-notes" v-if="extraNotes.length">
+      <button class="note-chip" :class="{ on: notesOpen }" @click="notesOpen = !notesOpen">
+        <svg class="ic"><use href="#i-info"></use></svg>{{ extraNotes.length }} 条说明
+      </button>
+      <div class="note-pop" v-if="notesOpen" @click.stop>
+        <div class="note-pop-item" v-for="n in extraNotes" :key="n.key">
+          <div class="note-pop-text" :title="n.title || n.text">{{ n.text }}</div>
+        </div>
+      </div>
     </div>
 
     <div class="toolbar-right">
-      <select class="sel" :value="filters.sort" @change="onSortChange" :title="sortHint">
-        <option v-for="s in sortOptions" :key="s.key" :value="s.key">{{ s.label }}</option>
+      <!--
+        排序和「最热门」的时间窗合成一个下拉，直接平铺（对齐 Wallpaper Engine）。
+        value 形如 `trend:7`（最热门 · 本周）/`mostrecent`（最近）。
+      -->
+      <select class="sel" :value="sortValue" @change="onSortChange" :title="sortHint" aria-label="排序方式">
+        <option v-for="s in sortOptionsFlat" :key="s.value" :value="s.value">{{ s.label }}</option>
       </select>
-      <!-- 「最热门」的时间窗：今日 / 本周 / 本月 / 本年（对齐 WE 客户端） -->
-      <select class="sel" v-if="filters.sort === 'trend'" :value="filters.days" @change="onDaysChange"
-              title="「最热门」的时间范围">
-        <option v-for="d in daysOptions" :key="d.value" :value="d.value">{{ d.label }}</option>
-      </select>
-      <!-- 上游固定 30 条/页，60 / 100 由后端拼多个上游页实现 -->
-      <select class="sel" :value="filters.pageSize" @change="onPageSizeChange" title="每页显示多少条">
+      <select class="sel" :value="filters.pageSize" @change="onPageSizeChange" title="每页显示多少条" aria-label="每页条数">
         <option v-for="s in pageSizeOptions" :key="s" :value="s">{{ s }} / 页</option>
       </select>
-      <label class="chk" :class="{ on: filters.hideMature }" @click.prevent="toggleMature"
-             title="Wallpaper Engine 客户端默认不展示成人内容，这里对齐。取消勾选即可看到全部">
-        <input type="checkbox" :checked="filters.hideMature">
-        <span class="box"></span>隐藏 18+
-      </label>
     </div>
   </div>
 
   <!-- ==================== 作者视图的返回条 ==================== -->
-  <!-- 注意：加载中不要显示总数（否则会闪出上一次列表的旧数字），所以要求 totalCount 已就绪 -->
+  <!-- 注意：加载中不要显示总数（否则会闪出上一次列表的旧数字） -->
   <div class="authorbar" v-if="mode === 'author' && authorView">
     <img v-if="authorView.avatar" class="avatar sm" :src="imgSrc(authorView.avatar)" alt="">
-    <span>正在查看作者 <b>{{ authorView.name || authorView.steamId }}</b> 的全部作品</span>
-    <span class="dim" v-if="loading">加载中…</span>
-    <span class="dim" v-else>共 {{ fmtCount(totalCount) }} 个</span>
-    <a :href="'https://steamcommunity.com/profiles/' + authorView.steamId + '/myworkshopfiles/?appid=431960'"
-       target="_blank" rel="noopener">在 Steam 中查看 ↗</a>
-    <button class="fbtn sm" @click="backToBrowse">← 返回创意工坊</button>
+    <svg class="ic" v-else><use href="#i-user"></use></svg>
+    <span class="authorbar-name">{{ authorView.name || authorView.steamId }}</span>
+    <span class="authorbar-sub" v-if="loading">加载中…</span>
+    <span class="authorbar-sub" v-else>共 {{ fmtCount(totalCount) }} 个作品</span>
+    <a class="authorbar-link" :href="'https://steamcommunity.com/profiles/' + authorView.steamId + '/myworkshopfiles/?appid=431960'"
+       target="_blank" rel="noopener">在 Steam 中查看
+      <svg class="ic tiny"><use href="#i-external"></use></svg>
+    </a>
+    <button class="btn ghost sm" @click="backToBrowse">
+      <svg class="ic"><use href="#i-arrow-left"></use></svg>返回
+    </button>
   </div>
 
   <!-- ============================ 主体 ============================ -->
   <!--
     布局：未选中作品时网格占满宽度；选中后才从右侧滑出详情面板（覆盖在网格之上），
     与 WE 客户端的行为一致 —— 好处是浏览时每行能多放一张，网格不会被裁掉。
+    筛选侧栏可以折叠（filtersCollapsed），折叠时宽度收到 0 并让网格接管。
   -->
-  <main class="layout" :class="{ 'has-detail': !!selected, 'no-filters': mode === 'subscribed' }">
+  <main class="layout" :class="{ 'has-detail': !!selected, 'no-filters': mode === 'subscribed', 'filters-collapsed': filtersCollapsed && mode !== 'subscribed' }">
+    <button v-if="mode !== 'subscribed'" class="filter-toggle" :class="{ open: !filtersCollapsed }"
+            :title="filtersCollapsed ? '显示筛选' : '收起筛选'" :aria-expanded="String(!filtersCollapsed)"
+            @click="filtersCollapsed = !filtersCollapsed">
+      <svg class="ic"><use :href="filtersCollapsed ? '#i-chev-right' : '#i-chev-left'"></use></svg>
+    </button>
+
     <filter-panel v-if="mode !== 'subscribed'" :meta="meta" :value="filters" :loading="loading"
                   @input="onFilterInput" @reset="resetFilters"></filter-panel>
 
     <section class="content" v-if="mode !== 'subscribed'">
       <!--
-        错误横幅：**不再清空网格**。上游一抖就把整页内容抹掉会让用户丢掉上下文
-        （测试报告 BUG-08），所以改成"保留上一次结果 + 顶部一条横幅 + 自动重试"。
+        统一提示条：同一时刻只显示一条（error > 慢 > 搜索说明 > 页数上限 > 订阅角标），
+        其余收进工具条的「N 条说明」芯片。列表加载失败时**不清空网格**，
+        保留上一次结果 + 一条横幅 + 自动重试。
       -->
-      <div v-if="error" class="banner error">
-        <b>加载失败：</b>{{ error }}
-        <span class="dim" v-if="items.length">（下面仍然是第 {{ staleFrom }} 页的旧数据）</span>
-        <span class="dim" v-else-if="retryCount < 2">正在自动重试…</span>
-        <button class="fbtn sm" @click="retryNow">立即重试</button>
-      </div>
-
-      <!-- 多词搜索的宽松匹配提示（BUG-09：搜不存在的长串却回来 23 万条） -->
-      <div v-if="searchNote && !dismissedNotes.search" class="notebar">
-        {{ searchNote }}
-        <button class="nb-close" @click="dismissNote('search')">知道了 ✕</button>
-      </div>
-
-      <!-- 深翻页上限说明（BUG-16） -->
-      <div v-if="pageCapNote && !dismissedNotes.cap" class="notebar">
-        {{ pageCapNote }}
-        <button class="nb-close" @click="dismissNote('cap')">知道了 ✕</button>
+      <div v-if="activeNote" class="notice" :class="activeNote.kind">
+        <svg class="ic"><use :href="'#i-' + activeNote.icon"></use></svg>
+        <span class="notice-text" :title="activeNote.title || activeNote.text">{{ activeNote.text }}</span>
+        <button class="btn sm" v-if="activeNote.action" @click="onNoticeAction(activeNote)">{{ activeNote.actionLabel }}</button>
+        <button v-if="activeNote.dismissible" class="notice-x" title="知道了" aria-label="知道了"
+                @click="dismissNote(activeNote.key)">
+          <svg class="ic"><use href="#i-x"></use></svg>
+        </button>
       </div>
 
       <div v-if="loading && !items.length" class="grid">
         <div v-for="n in 8" :key="n" class="skeleton"></div>
       </div>
 
-      <!-- 上游慢的时候别让人对着骨架屏干等：给一句提示 + 一个取消按钮 -->
-      <div v-if="slowHint" class="notebar warn">
-        {{ slowHint }}
-        <button class="nb-close" @click="cancelLoad">取消这次加载</button>
-      </div>
-
       <div v-else-if="!visibleItems.length" class="empty">
-        <div class="empty-ico">🗂</div>
-        <div v-if="mode === 'author'">该作者没有公开的创意工坊作品</div>
-        <div v-else>没有符合条件的作品</div>
-        <div class="empty-sub" v-if="mode === 'author'">（Steam 上该作者的"创意工坊物品"是空的）</div>
-        <div class="empty-sub" v-if="blockedOnPage">本页 {{ blockedOnPage }} 个作品来自你屏蔽的作者</div>
-        <div class="empty-sub" v-else-if="mode !== 'author'">试试减少标签，或点「重置过滤器」</div>
-        <button class="fbtn" v-if="blockedOnPage" @click="clearBlockedCreators">清空屏蔽名单</button>
-        <button class="fbtn" v-if="mode === 'author'" @click="backToBrowse">← 返回创意工坊</button>
-        <button class="fbtn" v-else @click="resetFilters">重置过滤器</button>
+        <svg class="ic empty-ic"><use href="#i-inbox"></use></svg>
+        <div class="empty-title" v-if="mode === 'author'">该作者没有公开的创意工坊作品</div>
+        <div class="empty-title" v-else>没有符合条件的作品</div>
+        <div class="empty-sub" v-if="blockedOnPage">本页 {{ blockedOnPage }} 个来自你屏蔽的作者</div>
+        <div class="empty-sub" v-else-if="mode !== 'author'">试试少选几个标签</div>
+        <div class="empty-actions">
+          <button class="btn" v-if="blockedOnPage" @click="clearBlockedCreators">清空屏蔽名单</button>
+          <button class="btn" v-if="mode === 'author'" @click="backToBrowse">返回发现</button>
+          <button class="btn" v-else @click="resetFilters">重置筛选</button>
+        </div>
       </div>
 
       <template v-else>
@@ -152,33 +215,25 @@
           <!--
             标签条默认只铺前几个：整组全选（例如把 25 个标签都勾上）时
             原来的写法会把 25 个 chip 全摊在工具条上，把查询条件撑成一大片。
-          -->
-          <!--
-            按类目分组显示。语义是「同类目内满足任一、跨类目同时满足」，
-            所以不能笼统写成"满足任一（42）"—— 42 个里跨类目其实是 AND。
+            按类目分组显示 —— 语义是「同类目内满足任一、跨类目同时满足」。
           -->
           <template v-for="(g, gi) in visibleChipGroups">
-            <span class="chips-label" :key="'l' + gi">{{ g.label }}：</span>
-            <span v-if="g.full" :key="'f' + gi" class="chip ex fixed"
-                  title="这一类全选在语义上等于不筛（每张作品都属于其中之一），点击清空"
-                  @click="clearGroup(g.key)">全选（不筛） ✕</span>
-            <span class="chip on" v-for="t in g.tags" :key="g.key + '|' + t"
-                  @click="removeTagIn(g.key, t)">{{ tagLabel(t) }} ✕</span>
+            <span class="chips-label" :key="'l' + gi">{{ g.label }}</span>
+            <span v-if="g.full" :key="'f' + gi" class="chip on" title="这一类全选等于不筛，点击清空"
+                  @click="clearGroup(g.key)">全选</span>
+            <span v-for="t in g.tags" :key="g.key + '|' + t" class="chip on"
+                  @click="removeTagIn(g.key, t)">{{ tagLabel(t) }}<svg class="ic xs"><use href="#i-x"></use></svg></span>
           </template>
-          <a v-if="hiddenChipCount" class="chips-toggle" @click="chipsExpanded = true">
-            …还有 {{ hiddenChipCount }} 个
-          </a>
+          <a v-if="hiddenChipCount" class="chips-toggle" @click="chipsExpanded = true">还有 {{ hiddenChipCount }} 个</a>
           <a v-else-if="effectiveChipCount > 6" class="chips-toggle" @click="chipsExpanded = false">收起</a>
-          <a v-if="chipGroups.length" class="chips-toggle" @click="clearTagChips" title="清空所有已选标签">清空标签</a>
-          <span v-if="blockedCreators.length" class="chip ex fixed"
-                title="右键菜单 → 报告和阻止 → 屏蔽该作者（只在本机生效），点这里清空"
-                @click="clearBlockedCreators">
-            已屏蔽 {{ blockedCreators.length }} 位作者<span v-if="blockedOnPage">（本页隐藏 {{ blockedOnPage }} 个）</span> ✕
+          <a v-if="chipGroups.length" class="chips-toggle" @click="clearTagChips">清空筛选</a>
+          <span v-if="blockedCreators.length" class="chip muted"
+                title="右键菜单里可以屏蔽作者，只在本机生效" @click="clearBlockedCreators">
+            已屏蔽 {{ blockedCreators.length }} 位作者<svg class="ic xs"><use href="#i-x"></use></svg>
           </span>
-          <span class="chip ex fixed" v-if="filters.hideMature" @click="toggleMature"
-                title="由工具条的「隐藏 18+」开关加上的，点击即可显示成人内容">隐藏：18+ ✕</span>
-          <span class="chip ex" v-for="t in filters.exclude" :key="'e' + t"
-                @click="removeExclude(t)">排除：{{ tagLabel(t) }} ✕</span>
+          <span class="chip muted" v-if="filters.exclude.length">
+            排除 {{ filters.exclude.length }} 项
+          </span>
         </div>
 
         <div class="grid" :class="{ dim: loading }" ref="gridScroll">
@@ -198,45 +253,60 @@
         </div>
 
         <div class="pager">
-          <button class="pg" :disabled="page <= 1" @click="prevPage">‹</button>
+          <button class="pg" :disabled="page <= 1" @click="prevPage" aria-label="上一页">
+            <svg class="ic"><use href="#i-chev-left"></use></svg>
+          </button>
           <button v-for="(p, i) in pageButtons" :key="i" class="pg"
                   :class="{ on: p === page, dots: p === '…' }"
                   :disabled="p === '…'" @click="goPage(p)">{{ p }}</button>
-          <button class="pg" :disabled="page >= totalPages" @click="nextPage">›</button>
+          <button class="pg" :disabled="page >= totalPages" @click="nextPage" aria-label="下一页">
+            <svg class="ic"><use href="#i-chev-right"></use></svg>
+          </button>
           <span class="pg-info" v-if="totalPages">第 {{ page }} / {{ Math.min(totalPages, 1000) }} 页</span>
+          <span class="pg-info dim" v-if="dupNote" :title="'「最热门」是实时榜单，翻页时名次会挪。这里把前面已经出现过的作品去掉了'">{{ dupNote }}</span>
         </div>
       </template>
     </section>
 
-    <!-- ==================== 已订阅（本地库口径：订阅时间 / 搜索 / 排序 / 设为使用中） ==================== -->
+    <!-- ==================== 已订阅（本地库口径） ==================== -->
     <section class="content" v-else>
       <div class="subs-bar">
-        <div class="subs-search">
-          <span class="search-ico">🔍</span>
-          <input type="text" v-model="subsSearchInput" placeholder="在已订阅里搜索标题 / 作者"
-                 @input="onSubsSearchInput" @keyup.enter="loadSubscribed">
-          <button v-if="subs.search" class="search-clear" @click="clearSubsSearch" title="清除搜索">✕</button>
+        <div class="search">
+          <svg class="ic search-ic"><use href="#i-search"></use></svg>
+          <input type="text" v-model="subsSearchInput" placeholder="在已订阅里搜索"
+                 aria-label="搜索已订阅" @input="onSubsSearchInput" @keyup.enter="loadSubscribed">
+          <button v-if="subs.search" class="search-clear" title="清除搜索" aria-label="清除搜索"
+                  @click="clearSubsSearch">
+            <svg class="ic"><use href="#i-x"></use></svg>
+          </button>
         </div>
-        <select class="sel" :value="subs.sort" @change="onSubsSortChange" title="排序方式">
+        <select class="sel" :value="subs.sort" @change="onSubsSortChange" title="排序方式" aria-label="已订阅排序">
           <option value="time_desc">订阅时间：新 → 旧</option>
           <option value="time_asc">订阅时间：旧 → 新</option>
           <option value="title">名称</option>
         </select>
-        <span class="count">共 {{ subs.totalCount }} 个已订阅</span>
-        <button class="fbtn sm" :disabled="subs.loading" @click="loadSubscribed(true)"
-                title="重新读本地库 + 重新拉 Steam 订阅列表（取消订阅后点这里）">
-          {{ subs.loading ? '读取中…' : '刷新' }}
+        <span class="result-count">共 {{ subs.totalCount }} 个</span>
+        <button class="btn sm" :disabled="subs.loading" @click="loadSubscribed(true)"
+                title="重新读取本地库和 Steam 订阅列表">
+          <svg class="ic" :class="{ spin: subs.loading }"><use href="#i-refresh"></use></svg>
+          {{ subs.loading ? '读取中' : '刷新' }}
         </button>
-        <span class="dim subs-src" :title="subs.wsDir || ''">
-          <template v-if="subs.source === 'steam'">订阅状态来自 Steam（{{ subs.totalCount }} 个）</template>
-          <template v-else>Steam 列表取不到，按本地库显示</template>
-          <template v-if="subs.staleLocalCount">；本地还留着 {{ subs.staleLocalCount }} 个已取消订阅的文件</template>
+        <span class="subs-src" :title="subs.wsDir || ''">
+          <template v-if="subs.source === 'steam'">订阅状态来自 Steam</template>
+          <template v-else-if="loggedIn">
+            <svg class="ic tiny"><use href="#i-alert"></use></svg>Steam 订阅列表没取到，先用本地记录
+            <button class="link-btn" @click="loadSubscribed(true)">重试</button>
+          </template>
+          <template v-else>
+            <svg class="ic tiny"><use href="#i-alert"></use></svg>未登录，只能显示本地已下载的
+          </template>
         </span>
       </div>
 
-      <div v-if="subs.error" class="banner error">
-        <b>加载失败：</b>{{ subs.error }}
-        <button class="fbtn sm" @click="loadSubscribed">立即重试</button>
+      <div v-if="subs.error" class="notice error">
+        <svg class="ic"><use href="#i-alert"></use></svg>
+        <span class="notice-text">{{ subs.error }}</span>
+        <button class="btn sm" @click="loadSubscribed">重试</button>
       </div>
 
       <div v-if="subs.loading && !subs.items.length" class="grid">
@@ -244,11 +314,13 @@
       </div>
 
       <div v-else-if="!subs.items.length" class="empty">
-        <div class="empty-ico">📥</div>
-        <div>{{ subs.search ? '没有匹配的已订阅项目' : '还没有已下载的订阅项目' }}</div>
-        <div class="empty-sub">订阅并下载完成的壁纸会自动出现在这里；订阅时间取项目文件夹的创建时间</div>
-        <button class="fbtn" @click="clearSubsSearch" v-if="subs.search">清除搜索</button>
-        <button class="fbtn" @click="backToBrowse">← 去创意工坊逛逛</button>
+        <svg class="ic empty-ic"><use href="#i-download"></use></svg>
+        <div class="empty-title">{{ subs.search ? '没有匹配的已订阅项目' : '还没有已下载的订阅项目' }}</div>
+        <div class="empty-sub">在 Steam 里订阅并下载完成后，会自动出现在这里</div>
+        <div class="empty-actions">
+          <button class="btn" v-if="subs.search" @click="clearSubsSearch">清除搜索</button>
+          <button class="btn" v-else @click="backToBrowse">去发现页逛逛</button>
+        </div>
       </div>
 
       <template v-else>
@@ -271,12 +343,16 @@
         </div>
 
         <div class="pager">
-          <button class="pg" :disabled="subs.page <= 1" @click="subsGoPage(subs.page - 1)">‹</button>
+          <button class="pg" :disabled="subs.page <= 1" @click="subsGoPage(subs.page - 1)" aria-label="上一页">
+            <svg class="ic"><use href="#i-chev-left"></use></svg>
+          </button>
           <button v-for="(p, i) in subsPageButtons" :key="i" class="pg"
                   :class="{ on: p === subs.page, dots: p === '…' }"
                   :disabled="p === '…'" @click="subsGoPage(p)">{{ p }}</button>
-          <button class="pg" :disabled="subs.page >= subs.totalPages" @click="subsGoPage(subs.page + 1)">›</button>
-          <span class="pg-info">第 {{ subs.page }} / {{ subs.totalPages }} 页</span>
+          <button class="pg" :disabled="subs.page >= subs.totalPages" @click="subsGoPage(subs.page + 1)" aria-label="下一页">
+            <svg class="ic"><use href="#i-chev-right"></use></svg>
+          </button>
+          <span class="pg-info" v-if="subs.totalPages">第 {{ subs.page }} / {{ subs.totalPages }} 页</span>
         </div>
       </template>
     </section>
@@ -299,21 +375,77 @@
                  @close="selected = null; detail = null; related = null"></detail-pane>
   </main>
 
-    <!-- ============================ 抽屉 ============================ -->
-    <settings-drawer :open="settingsOpen" :status="status" :session="session" :host="host"
-                     @close="settingsOpen = false" @changed="onSessionChanged"></settings-drawer>
+  <!-- ============================ 抽屉 ============================ -->
+  <settings-drawer :open="settingsOpen" :section="settingsSection" :status="status" :session="session" :host="host"
+                   @close="settingsOpen = false" @changed="onSessionChanged"></settings-drawer>
 
-    <!-- ============================ 卡片右键菜单 ============================ -->
-    <context-menu :open="menu.open" :x="menu.x" :y="menu.y" :item="menu.item"
-                  :subscribed="isSubscribedId(menu.item && menu.item.id)"
-                  :favorited="!!(menu.item && favoriteIds[menu.item.id])"
-                  :current="!!(menu.item && isCurrentWallpaper(menu.item.id))"
-                  :can-apply="canApplyId(menu.item && menu.item.id)"
-                  :busy="!!(menu.item && busyIds[menu.item.id])"
-                  :creator-blocked="!!(menu.item && blockedIds[menu.item.creator])"
-                  @action="onMenuAction" @close="closeCardMenu"></context-menu>
+  <!-- ============================ 卡片右键菜单 ============================ -->
+  <context-menu :open="menu.open" :x="menu.x" :y="menu.y" :item="menu.item"
+                :subscribed="isSubscribedId(menu.item && menu.item.id)"
+                :favorited="!!(menu.item && favoriteIds[menu.item.id])"
+                :current="!!(menu.item && isCurrentWallpaper(menu.item.id))"
+                :can-apply="canApplyId(menu.item && menu.item.id)"
+                :busy="!!(menu.item && busyIds[menu.item.id])"
+                :creator-blocked="!!(menu.item && blockedIds[menu.item.creator])"
+                @action="onMenuAction" @close="closeCardMenu"></context-menu>
 
-    <!-- ============================ 提示 ============================ -->
+  <!-- ============================ 整屏加载 ============================ -->
+  <!--
+    首屏（还没有任何内容可显示时）盖一层全屏遮罩：
+    只画品牌 + 一个进度条，不遮挡"上一次的结果"（翻页时仍然保留旧内容 + 顶部提示条，
+    上游一抖不至于把用户正在看的东西抹掉）。
+  -->
+  <transition name="boot">
+    <div v-if="bootLoading" class="boot">
+      <div class="boot-inner">
+        <svg class="boot-mark" viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="2" y="3" width="20" height="15" rx="2.5"/>
+          <circle cx="16.8" cy="7.6" r="1.7"/>
+          <path d="M2.5 15.5l5.6-5.2 3.9 3.6 3.2-2.8 6.3 5.9"/>
+        </svg>
+        <div class="boot-title">创意工坊</div>
+        <div class="boot-bar"><i></i></div>
+        <div class="boot-hint">{{ bootHint }}</div>
+      </div>
+    </div>
+  </transition>
+
+  <!-- 点击别处关掉「N 条说明」的浮层 -->
+  <div v-if="notesOpen" class="click-catcher" @click="notesOpen = false"></div>
+
+  <!-- ============================ 确认弹窗 ============================ -->
+  <!--
+    订阅前发现「必需物品」还没订时弹这个：对齐 Wallpaper Engine / Steam 客户端的行为
+    （只订依赖项的话，壁纸在 WE 里根本加载不出来）。
+  -->
+  <transition name="modal">
+    <div v-if="confirm && confirm.kind === 'deps'" class="modal-mask" @click.self="onConfirmCancel">
+      <div class="modal" role="dialog" aria-modal="true" aria-label="确认订阅">
+        <div class="modal-head">需要一起订阅依赖的壁纸</div>
+        <div class="modal-body">
+          <p class="modal-lead">
+            此壁纸 <b>{{ confirm.item.title }}</b> 是下面 {{ confirm.deps.length }} 个壁纸的预设 /
+            衍生版本，<b>只订阅它是用不了的</b>。
+          </p>
+          <div class="dep-list">
+            <div class="dep-row" v-for="d in confirm.deps" :key="d.id">
+              <svg class="ic"><use href="#i-layers"></use></svg>
+              <span class="dep-title">{{ d.title }}</span>
+              <span class="dep-new">未订阅</span>
+            </div>
+          </div>
+          <p class="modal-note">一起订阅后 Steam 会把缺的几张一并下载。</p>
+        </div>
+        <div class="modal-foot">
+          <button class="btn" @click="onConfirmCancel">取消</button>
+          <button class="btn ghost" @click="onConfirmDepsSkip" title="只订阅这一个（大概率加载不出来）">只订阅这个</button>
+          <button class="btn primary" @click="onConfirmDeps">一起订阅（{{ confirm.deps.length + 1 }} 个）</button>
+        </div>
+      </div>
+    </div>
+  </transition>
+
+  <!-- ============================ 提示 ============================ -->
   <transition name="toast">
     <div v-if="toast" class="toast" :class="toast.type">{{ toast.text }}</div>
   </transition>

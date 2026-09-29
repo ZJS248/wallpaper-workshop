@@ -145,7 +145,7 @@ function check(name, cond, extra) {
   check('search 命令生效', searched, '');
   await sleep(3000);
   const firstAfter = await evIn(`document.querySelector('.card .card-title') ? document.querySelector('.card .card-title').textContent.trim() : ''`);
-  const totalAfter = await evIn(`document.querySelector('.count') ? document.querySelector('.count').textContent : ''`);
+  const totalAfter = await evIn(`document.querySelector('.result-count') ? document.querySelector('.result-count').textContent : ''`);
   check('搜索结果已刷新', !!totalAfter, totalAfter + ' | ' + firstAfter);
 
   // 5) 下发命令：重置

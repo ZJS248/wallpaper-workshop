@@ -75,15 +75,15 @@ function check(name, cond, extra) {
   // 注意：Vue 会给元素加 data-v-xxxx，class 属性会变成 class="card" 或 class="card active"…
   const cardCount = (dom.match(/class="card[^"]*"/g) || []).length;
   check('渲染出卡片', cardCount > 0, cardCount + ' 张卡片');
-  const hasFilters = dom.includes('重置过滤器') && dom.includes('年龄分级') && dom.includes('分辨率');
+  const hasFilters = dom.includes('class="fgroup') && dom.includes('年龄分级') && dom.includes('分辨率');
   check('筛选器渲染', hasFilters, '');
   check('排序下拉有「评分最高」', dom.includes('评分最高'), '');
-  check('详情面板空态', dom.includes('从左侧点选一张壁纸'), '');
+  check('详情面板空态', dom.includes('选择一张壁纸查看详情'), '');
   // 图片是 loading="lazy"，首屏只解析出一部分，所以断言"至少有一批"而不是全部
   const imgProxied = (dom.match(/\/img\?u=/g) || []).length;
   check('预览图走后端代理', imgProxied > 0, imgProxied + ' 个 /img?u= 图片（其余懒加载）');
   check('卡片带类型角标（中文）', dom.includes('badge-type'), '');
-  check('顶栏状态显示', dom.includes('已登录') || dom.includes('未登录'), '');
+  check('顶栏状态显示', /已登录|未登录|登录态失效/.test(dom), '');
   check('没有残留的 Vue 花括号表达式', !/\{\{\s*\w+\./.test(dom), '');
 
   // ---- 2. 截图 ----

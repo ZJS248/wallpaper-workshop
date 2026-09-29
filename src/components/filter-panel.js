@@ -1,12 +1,16 @@
 /**
- * 左侧筛选器：对齐 WE 创意工坊截图的结构
- *   重置过滤器 / 筛选器设置 两个大按钮
- *   仅显示（快捷开关：隐藏成人内容）
- *   类型 / 年龄分级 / 分辨率 / 标签（可折叠分组，带全选·无）
+ * 左侧筛选面板。
  *
- * 原来的「只看已订阅」已移除：它是**纯前端过滤当前页**（测试报告 BUG-06，
- * 浏览态勾上后永远是空的），而"只看已订阅"本质上等于切到订阅列表 ——
- * 本项目的范围就是创意工坊列表，不做订阅/收藏列表视图。
+ * 结构：头部（标题 + 问号说明 + 重置） → 已筛选条 → 可滚动的分组列表。
+ * 分组仍是 类型 / 年龄分级 / 分辨率 / 标签 / 特性，每组可折叠、可搜索。
+ *
+ * 「隐藏成人内容」只在这里出现一次（原来工具条里还有一份重复的复选框）。
+ * 「排除标签」用可搜索的弹层，替代原来 40+ 项的原生下拉。
+ *
+ * 原本常驻在面板里的 OR/AND 说明段落、筛选器设置表头、标签来源统计都是
+ * 开发期信息或大段文字，收进 `?` 弹层或直接删掉。
+ *
+ * ⚠️ filter-group 的「本地选中集」实现（修 BUG：连点复选框互相覆盖）逐字保留。
  */
 
 /** 可折叠分组 */
@@ -16,7 +20,6 @@ Vue.component('filter-group', {
     selected: { type: Array, default: () => [] },
     all: { type: Array, default: () => [] },
     collapsedDefault: { type: Boolean, default: false },
-    icon: { type: String, default: '▸' },
     /**
      * 可选的二级分组（分辨率用）：[{ label: '宽屏', tags: [...] }, …]
      * 只是显示分组，选中集仍然是整个组（组内 OR）——与客户端的
@@ -74,6 +77,10 @@ Vue.component('filter-group', {
     allSelected() {
       return this.all.length > 0 && this.local.length === this.all.length;
     },
+    /** 复选框行高 28px，超过一屏才需要"全部/清空/搜索"这排工具 */
+    showTools() {
+      return this.all.length > 8;
+    },
   },
   methods: {
     toggle(tag) {
@@ -99,7 +106,7 @@ Vue.component('filter-group', {
         if (next.indexOf(t) < 0) next.push(t);
       });
       this.local = next;
-      this.$emit('change', next);
+      this.$emit('change', this.local);
     },
     /** 子组的"无"：把这些值从选中集里摘掉 */
     selectNoneOf(tags) {
@@ -113,28 +120,29 @@ Vue.component('filter-group', {
   },
   template: `
     <div class="fgroup">
-      <div class="fgroup-head" @click="collapsed = !collapsed">
-        <span class="caret" :class="{ collapsed: collapsed }">▾</span>
+      <button class="fgroup-head" :aria-expanded="String(!collapsed)" @click="collapsed = !collapsed">
+        <svg class="ic caret" :class="{ collapsed: collapsed }"><use href="#i-chev-down"></use></svg>
         <span class="fgroup-title">{{ title }}</span>
         <span v-if="local.length" class="fgroup-count">{{ local.length }}</span>
-      </div>
+        <span v-if="local.length" class="fgroup-clear" @click.stop="selectNone">清除</span>
+      </button>
       <div v-show="!collapsed" class="fgroup-body">
-        <div class="fgroup-tools">
-          <a @click="selectAll" :class="{ disabled: allSelected }">全部</a>
-          <span class="sep">|</span>
+        <div class="fgroup-tools" v-if="showTools">
+          <a @click="selectAll" :class="{ disabled: allSelected }">全选</a>
           <a @click="selectNone" :class="{ disabled: !local.length }">清空</a>
-          <input v-if="all.length > 12" v-model="keyword" class="fgroup-search" placeholder="过滤…" @click.stop>
+          <input v-model="keyword" class="fgroup-search" type="text" placeholder="筛选选项"
+                 aria-label="在本组内搜索" @click.stop>
         </div>
         <template v-for="(sg, si) in visibleGroups">
           <div v-if="sg.label" :key="'h' + si" class="fsub-head">
             <span class="fsub-title">{{ sg.label }}</span>
             <span v-if="sg.selCount" class="fsub-count">{{ sg.selCount }}</span>
             <a class="fsub-act" :class="{ disabled: sg.selCount === sg.tags.length }"
-               @click.stop="selectAllOf(sg.tags)">全部</a>
+               @click.stop="selectAllOf(sg.tags)">全选</a>
             <a class="fsub-act" :class="{ disabled: !sg.selCount }"
                @click.stop="selectNoneOf(sg.tags)">无</a>
           </div>
-          <label v-for="t in sg.tags" :key="t" class="fitem" :class="{ on: isOn(t) }">
+          <label v-for="t in sg.tags" :key="t" class="fitem" :class="{ on: isOn(t) }" :data-tag="t">
             <input type="checkbox" :checked="isOn(t)" @change="toggle(t)">
             <span class="box"></span>
             <span class="fitem-text">{{ tagLabel(t) }}</span>
@@ -152,6 +160,9 @@ Vue.component('filter-panel', {
     meta: { type: Object, default: null },
     value: { type: Object, required: true },
     loading: { type: Boolean, default: false },
+  },
+  data() {
+    return { helpOpen: false, excludeOpen: false, excludeKey: '' };
   },
   computed: {
     groups() {
@@ -187,15 +198,30 @@ Vue.component('filter-panel', {
     tagGroups() {
       return this.value.tagGroups || {};
     },
-    /** 某类目已选几个 */
-    countOf() {
+    /** 参与查询的已选标签数（整组全选 = 不筛，不计入，和顶部 chips 的口径一致） */
+    activeCount() {
       const g = this.tagGroups;
-      return (key) => (g[key] || []).length;
+      let n = 0;
+      Object.keys(g).forEach((k) => {
+        const vals = g[k] || [];
+        if (!vals.length) return;
+        const def = this.groups.find((x) => x.key === k);
+        const full = def && def.tags && vals.length >= def.tags.length &&
+          def.tags.every((t) => vals.indexOf(t) >= 0);
+        if (!full) n += vals.length;
+      });
+      return n + (this.value.exclude || []).length;
     },
-    /** 全部已选（扁平，用于"已选标签"条） */
-    allSelected() {
-      const g = this.tagGroups;
-      return Object.keys(g).reduce((acc, k) => acc.concat(g[k] || []), []);
+    /** 排除标签弹层里可选项（已排除的不再重复出现） */
+    excludeOptions() {
+      const all = this.contentTags.concat(this.ageTags).concat(this.resTags);
+      const cur = this.value.exclude || [];
+      const k = (this.excludeKey || '').toLowerCase();
+      return all.filter((t) => {
+        if (cur.indexOf(t) >= 0) return false;
+        if (!k) return true;
+        return t.toLowerCase().includes(k) || String(tagLabel(t)).toLowerCase().includes(k);
+      });
     },
   },
   methods: {
@@ -209,73 +235,98 @@ Vue.component('filter-panel', {
       else delete next[key];
       this.update({ tagGroups: next });
     },
+    addExclude(tag) {
+      if (!tag) return;
+      this.update({ exclude: (this.value.exclude || []).concat([tag]) });
+      this.excludeKey = '';
+    },
+    removeExclude(tag) {
+      this.update({ exclude: (this.value.exclude || []).filter((x) => x !== tag) });
+    },
     reset() {
       this.$emit('reset');
     },
   },
   template: `
     <aside class="filters">
-      <button class="fbtn primary" @click="reset" :disabled="loading">
-        <span class="fbtn-ico">↺</span> 重置过滤器
+      <div class="filters-head">
+        <h2 class="filters-title">筛选</h2>
+        <button class="help-dot" :class="{ on: helpOpen }" title="筛选规则说明"
+                aria-label="筛选规则说明" @click="helpOpen = !helpOpen">?</button>
+        <button class="btn ghost sm" @click="reset" :disabled="loading">重置</button>
+      </div>
+
+      <div class="filter-help" v-if="helpOpen">
+        同一类目里选多个 = <b>满足其中之一</b>（例如同时勾 2K 和 4K）；<br>
+        不同类目之间 = <b>同时满足</b>（例如"场景"且"4K"）。
+      </div>
+
+      <button v-if="activeCount" class="filter-active" @click="reset">
+        已筛选 {{ activeCount }} 项
+        <svg class="ic tiny"><use href="#i-x"></use></svg>
       </button>
 
-      <div class="fpanel">
-        <div class="fpanel-head"><span class="fbtn-ico">⚙</span> 筛选器设置</div>
-
+      <div class="filter-scroll">
+        <!-- 仅显示：隐藏成人内容。工具条里原来还有一份重复的复选框，已去掉。 -->
         <div class="fgroup">
-          <div class="fgroup-head static"><span class="fgroup-title">仅显示</span></div>
           <div class="fgroup-body">
-            <label class="fitem" :class="{ on: value.hideMature }" title="Wallpaper Engine 客户端默认不展示成人内容，这里对齐">
+            <label class="fitem" :class="{ on: value.hideMature }" title="不显示 18+ 分级的内容"
+                   data-filter="hideMature">
               <input type="checkbox" :checked="!!value.hideMature" @change="update({ hideMature: !value.hideMature })">
               <span class="box"></span>
-              <span class="fitem-text">隐藏成人内容（18+）</span>
+              <span class="fitem-text">隐藏成人内容</span>
             </label>
-            <div class="fhint">
-              同一类目里选多个 = <b>满足其中一个</b>（例如同时勾 2K 和 4K）；<br>
-              不同类目之间 = <b>同时满足</b>（例如"场景"且"2K"）。
-            </div>
           </div>
         </div>
 
-        <filter-group title="类型" icon="🎬" :show-raw="false"
+        <filter-group title="类型" :show-raw="false"
                       :all="typeTags" :selected="tagGroups.type || []"
                       @change="v => setGroup('type', v)"></filter-group>
 
-        <filter-group title="年龄分级" icon="🔞" :show-raw="false"
+        <filter-group title="年龄分级" :show-raw="false"
                       :all="ageTags" :selected="tagGroups.age || []"
                       @change="v => setGroup('age', v)"></filter-group>
 
-        <filter-group title="分辨率" icon="🖥"
+        <filter-group title="分辨率"
                       :all="resTags" :subgroups="resSubgroups" :show-raw="false"
                       :selected="tagGroups.resolution || []"
                       @change="v => setGroup('resolution', v)"></filter-group>
 
-        <filter-group title="标签" icon="🏷"
+        <filter-group title="标签"
                       :all="contentTags" :selected="tagGroups.content || []"
                       @change="v => setGroup('content', v)"></filter-group>
 
-        <filter-group v-if="featureTags.length" title="特性" icon="✨" :show-raw="false"
+        <filter-group v-if="featureTags.length" title="特性" :show-raw="false"
                       :all="featureTags" :selected="tagGroups.feature || []"
                       @change="v => setGroup('feature', v)"></filter-group>
 
         <div class="fgroup">
-          <div class="fgroup-head static"><span class="fgroup-title">排除标签</span></div>
-          <div class="fgroup-body">
+          <div class="fgroup-head static">
+            <svg class="ic caret" style="opacity:0"><use href="#i-chev-down"></use></svg>
+            <span class="fgroup-title">排除</span>
+            <span v-if="(value.exclude || []).length" class="fgroup-count">{{ value.exclude.length }}</span>
+          </div>
+          <div class="fgroup-body fselect-wrap">
             <div class="chips" v-if="(value.exclude || []).length">
-              <span v-for="t in value.exclude" :key="t" class="chip" @click="update({ exclude: value.exclude.filter(x => x !== t) })">
-                {{ tagLabel(t) }} ✕
+              <span v-for="t in value.exclude" :key="t" class="chip muted" @click="removeExclude(t)">
+                {{ tagLabel(t) }}<svg class="ic xs"><use href="#i-x"></use></svg>
               </span>
             </div>
-            <select class="fselect" @change="e => { if (e.target.value) { update({ exclude: (value.exclude || []).concat([e.target.value]) }); e.target.value = ''; } }">
-              <option value="">+ 添加排除标签</option>
-              <option v-for="t in contentTags.concat(ageTags).concat(resTags)" :key="t" :value="t">{{ tagLabel(t) }}</option>
-            </select>
+            <button class="btn sm" style="width:100%;margin-top:6px" @click="excludeOpen = !excludeOpen">
+              <svg class="ic"><use href="#i-plus"></use></svg>{{ excludeOpen ? '收起' : '添加排除项' }}
+            </button>
+            <div class="exclude-pop" v-if="excludeOpen">
+              <input type="text" v-model="excludeKey" placeholder="搜索标签" aria-label="搜索要排除的标签"
+                     @click.stop>
+              <div class="exclude-list" @click.stop>
+                <div v-for="t in excludeOptions" :key="t" class="exclude-opt" @click="addExclude(t)">
+                  <span class="fitem-text">{{ tagLabel(t) }}</span>
+                </div>
+                <div v-if="!excludeOptions.length" class="fgroup-empty">没有匹配项</div>
+              </div>
+            </div>
           </div>
         </div>
-      </div>
-
-      <div class="fmeta" v-if="meta">
-        标签来源：{{ meta.tagSource === 'steam' ? 'Steam 实时' : '内置表' }} · 共 {{ (meta.tags || []).length }} 个标签
       </div>
     </aside>
   `,

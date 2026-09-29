@@ -356,6 +356,26 @@ function normalizeItem(raw) {
     ageRating: pickAgeTag(tags),
     resolution: pickResolutionTag(tags),
     isCollection: Number(raw.file_type) === 2,
+    /**
+     * 依赖的子项目（"这个壁纸需要另一个壁纸"）。
+     *
+     * Steam 的创意工坊里"预设/场景依赖另一个壁纸"很常见：只订阅依赖项的话，
+     * 到了 Wallpaper Engine 里是加载不出来的（用户就遇到过：订阅了
+     * 「德克萨斯-Texas」，结果根本用不了）。客户端订阅时会弹窗问要不要一起订，
+     * 我们要在界面上做同样的提示，所以把 `children` 带出来。
+     *
+     * 只有 GetPublishedFileDetails 会返回这个字段（浏览页 SSR 不返回），
+     * 所以 `item.children` 可能是 undefined —— 那是"确认没有依赖"，不是"没查"。
+     */
+    children: Array.isArray(raw.children)
+      ? raw.children
+          .filter((c) => c && c.publishedfileid)
+          .map((c) => ({
+            id: String(c.publishedfileid),
+            title: c.title || '(无标题)',
+            previewUrl: c.preview_url || '',
+          }))
+      : undefined,
     raw,
   };
 }
@@ -749,6 +769,38 @@ function parseDetailHtml(html, id, url, setCookies) {
   // 标签集（右栏 workshopTags）
   const tagOptions = extractTagOptions(html);
 
+  /**
+   * 「必需物品」—— 这件物品依赖的其它创意工坊项目。
+   *
+   * 页面结构（实测 id=3809945294「德克萨斯-Texas」）：
+   *   <div class="rightSectionTopTitle condensed">必需物品</div>
+   *   <div class="rightSectionMinorText">这件物品需要以下所有其它物品</div>
+   *   <div class="requiredItemsContainer" id="RequiredItems">
+   *     <a href="…/workshop/filedetails/?id=921617616" data-subscribed="0">
+   *       <div class="requiredItem"> [4K]Audio Visualizer v0.6.6(音频可视化) </div>
+   *     </a>
+   *   </div>
+   *
+   * `data-subscribed="1"` 表示当前用户已经订了 —— 正好用来只提示"还缺哪些"。
+   *
+   * 为什么必须做：只订阅依赖项的话，壁纸在 Wallpaper Engine 里根本加载不出来
+   * （用户踩过：订阅了「德克萨斯-Texas」，结果用不了，还不知道为什么）。
+   * Steam 客户端订阅这类物品时会弹窗问要不要一起订，我们要做同样的事。
+   *
+   * 注意：只有**详情页 HTML** 有这个块，浏览页 SSR 和公开的
+   * GetPublishedFileDetails 都不返回（后者只给 `children` 字段，而实测是 undefined）。
+   */
+  const requiredItems = [];
+  const reqRe = /<a[^>]*href="[^"]*filedetails\/\?id=(\d+)"[^>]*data-subscribed="(\d)"[^>]*>\s*<div class="requiredItem">([\s\S]{0,300}?)<\/div>/g;
+  let rm;
+  while ((rm = reqRe.exec(html))) {
+    requiredItems.push({
+      id: rm[1],
+      title: decodeEntities(rm[3].replace(/<[^>]*>/g, '')).replace(/\s+/g, ' ').trim(),
+      subscribed: rm[2] === '1',
+    });
+  }
+
   // 大图与截图
   const screenshots = [];
   const scRe = /href="(https:\/\/images\.steamusercontent\.com\/ugc\/[^"]+)"/g;
@@ -776,6 +828,7 @@ function parseDetailHtml(html, id, url, setCookies) {
     rating,
     collections,
     tagOptions,
+    requiredItems,
     screenshots: screenshots.slice(0, 12),
     // 详情页本体字段有限，主体（标签/文件大小/时间）由公开 API 补齐
     item: null,
