@@ -20,6 +20,7 @@ const { URL } = require('url');
 const settings = require('./lib/settings');
 const routes = require('./routes');
 const session = require('./lib/session');
+const { HttpError } = require('./lib/util');
 
 const ROOT = path.resolve(__dirname, '..');
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -113,6 +114,22 @@ const server = http.createServer(async (req, res) => {
   // 简单的访问日志（只记接口，静态资源不刷屏）
   const shouldLog = pathname.startsWith('/api/') || pathname === '/img';
 
+  /*
+   * 图片代理跑在哪个端口，页面需要知道才能拼出 <img> 的地址。
+   * 这里按**请求自己的 Host** 生成，而不是写死 127.0.0.1：
+   * 通过局域网 IP 访问时（host 0.0.0.0），图片也必须用同一个 IP 才不会被浏览器拦。
+   */
+  if (pathname === '/imgbase.js') {
+    const host = String(req.headers.host || '').split(':')[0] || '127.0.0.1';
+    const body = 'window.WW_IMG_BASE=' + JSON.stringify(imgPort ? 'http://' + host + ':' + imgPort : '') + ';';
+    res.writeHead(200, {
+      'Content-Type': 'text/javascript; charset=utf-8',
+      'Content-Length': Buffer.byteLength(body),
+      'Cache-Control': 'no-cache',
+    });
+    return res.end(body);
+  }
+
   try {
     // 注意：静态分支必须放在 try 里面，并且用 `return` 收尾。
     // 曾经的写法是 `if (!handled) serveStatic(...)` —— serveStatic 是异步的，
@@ -141,16 +158,90 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+/* ------------------------------ 图片代理（独立端口） ------------------------------ */
+/*
+ * 为什么图片要单独占一个端口
+ * ---------------------------------------------------------------------------
+ * 浏览器（Chromium / Electron）对 **HTTP/1.1 的每个 origin 只开 6 条并发连接**。
+ * 本项目是纯 HTTP/1.1（`http.createServer`，没有 HTTPS，所以用不上 HTTP/2 多路复用），
+ * 而一屏 30 张预览图全部走同源的 `/img?u=…` —— 6 条连接瞬间占满，
+ * `/api/subscribed` 这种接口请求排在后面拿不到 socket。
+ *
+ * 实测症状（用户提供的 DevTools 截图）：
+ *     Connection start / 已停止  10.92 秒   ← 请求根本没发出去
+ *     已发送请求                 0.15 毫秒
+ *     正在等待服务器响应          6.05 秒   ← 后端真实只花了 6 秒
+ *     总计                      16.97 秒
+ * 也就是说 64% 的时间耗在"排队等连接"，而 Steam 那边只背了 6 秒的锅。
+ *
+ * 注意：服务端那个 `imageGate`（routes.js）**并不能缓解这个问题**。
+ * 它是在请求已经被 accept 之后才 await 的，图片请求占着浏览器那条 socket，
+ * 服务端却既不响应也不干活，只是挂进队列干等 —— 队列从浏览器搬到了服务端，
+ * 一个 socket 都没省下来。把 origin 真正拆开才是干净的解法。
+ *
+ * 拆开之后：图片和接口各拿各的 6 条连接，谁也挤不倒谁。
+ * 独立端口起不来时（端口被占 / 权限问题）imgPort 置 0，前端自动退回同源 /img，
+ * 行为与改动前完全一致 —— 只是慢，不会坏。
+ */
+let imgPort = 0;
+
+const imgServer = http.createServer(async (req, res) => {
+  let url;
+  try {
+    url = new URL(req.url, 'http://' + (req.headers.host || 'localhost'));
+  } catch (e) {
+    res.writeHead(400);
+    return res.end('bad request');
+  }
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET,OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+    });
+    return res.end();
+  }
+  if (url.pathname !== '/img') {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+    return res.end('这个端口只提供 /img');
+  }
+  try {
+    await routes.handleImage(req, res, url);
+  } catch (e) {
+    if (!res.headersSent) {
+      const status = e instanceof HttpError ? e.status : 500;
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, error: e.message || String(e) }));
+    } else if (!res.writableEnded) {
+      res.end();
+    }
+    if (!(e instanceof HttpError)) console.error('[img-error]', url.search, e.stack || e.message);
+  }
+});
+
 (async () => {
   const cfg = await settings.initAsync();
   const port = cfg.port;
   const host = cfg.host || '0.0.0.0';
+
+  /*
+   * 同步把 imgPort 置上（在 listen 回调之前），避免"端口其实起得来、
+   * 但 /imgbase.js 已经先发过一版空值"的窗口期。
+   * 起失败再由 error 事件置回 0，前端下次取到空串就退回同源。
+   */
+  imgPort = port + 1;
+  imgServer.on('error', (e) => {
+    imgPort = 0;
+    console.warn('  图片代理独立端口 ' + (port + 1) + ' 启动失败（' + (e.code || e.message) + '），退回同源 /img');
+  });
+  imgServer.listen(imgPort, host);
 
   server.listen(port, host, () => {
     console.log('');
     console.log('  wallpaper-workshop  ·  Wallpaper Engine 创意工坊（网页版）');
     console.log('  ────────────────────────────────────────────────────────');
     console.log('  前端 / 接口 : http://localhost:' + port + '/');
+    console.log('  图片代理    : 端口 ' + imgPort + '（与接口分开，避免互相抢浏览器那 6 条连接）');
     console.log('  应用 ID     : ' + require('./lib/util').APP_ID + '  (Wallpaper Engine)');
     console.log('  代理        : ' + (cfg.proxy || '(直连)') + '  来源: ' + (cfg.proxySource || 'direct'));
     console.log('  登录态      : ' + (cfg.cookie ? cfg.cookie.length + ' 字节，来源 ' + cfg.cookieSource : '未登录（浏览不受影响）'));

@@ -1633,9 +1633,10 @@ async function vote(id, up, ctx) {
  *   - 只在后台跑（调用方 await 的是 `background`，不是结果）；
  *   - 上游页大小只能 30（实测其它值退化成 10 条/页），所以用 30；
  *   - 页数上限 MAX_SUB_PAGES，订阅上千个的账号不会把 Steam 打爆；
- *   - 每页一个请求、并发 3，实测 7 页约 3 秒。
+ *   - 每页一个请求、并发 SUB_PAGE_CONCURRENCY。
  */
 const MAX_SUB_PAGES = 12;
+const SUB_PAGE_CONCURRENCY = 5;
 
 async function getSubscribedIds(ctx) {
   const jwt = sc.parseSteamJwt(ctx.cookie);
@@ -1661,7 +1662,15 @@ async function getSubscribedIds(ctx) {
   if (needPages > 1) {
     const rest = [];
     for (let p = 2; p <= needPages; p++) rest.push(p);
-    const pages = await pageStore.mapLimit(rest, 3, (p) =>
+    /*
+     * 并发 3 → 5。
+     *
+     * 这条链路是 noLimit 的（不吃社区页那套 1200ms 最小间隔），所以提高并发
+     * 不会像 /api/browse 那样把 Steam 打成 429。185 个订阅 = 7 页：
+     *   并发 3 → 1 + 2 轮；并发 5 → 1 + 1 轮
+     * 每页走本地代理约 1.5~2.5 秒，省掉的这一轮就是 1.5~2.5 秒。
+     */
+    const pages = await pageStore.mapLimit(rest, SUB_PAGE_CONCURRENCY, (p) =>
       authorPage.fetchProfileWorks(jwt.steamId, Object.assign({}, common, { page: p }))
     );
     pages.forEach((r) => {

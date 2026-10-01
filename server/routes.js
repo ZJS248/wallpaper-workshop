@@ -22,6 +22,10 @@
  *   POST /api/session/pull-parent        从父项目后端拉 Cookie
  *   GET  /img?u=<url>                    图片代理（绕过防盗链 + 走代理）
  *
+ * /img 还可以**单独跑在另一个端口**上（server.js 的图片代理服务器），
+ * 这样它和 /api 就不是一个 origin、不会互相挤占浏览器那 6 条 HTTP/1.1 连接。
+ * 本文件里两条路径都留着：独立端口起不来时自动退回同源，行为与从前一致。
+ *
  * 所有读接口都校验 HTTP 方法（非允许方法 → 405），写接口只接受 POST。
  */
 
@@ -142,6 +146,10 @@ function sendFallbackImage(res, cacheState) {
     'Content-Length': FALLBACK_GIF.length,
     // 失败也让它缓存一小会儿，别让同一张坏图被反复重试
     'Cache-Control': 'public, max-age=300',
+    // 图片代理可能跑在**另一个端口**（见 server.js 的 IMG_PORT），
+    // 那就是跨源了。带上 CORS 头，<img> 能正常显示，将来要用
+    // canvas / createImageBitmap 读这张图也不会静默失败。
+    'Access-Control-Allow-Origin': '*',
     'X-Cache': cacheState || 'FALLBACK',
   });
   res.end(FALLBACK_GIF);
@@ -168,6 +176,7 @@ async function handleImage(req, res, url) {
       'Content-Type': hit.type,
       'Content-Length': hit.buf.length,
       'Cache-Control': 'public, max-age=86400',
+      'Access-Control-Allow-Origin': '*',
       'X-Cache': 'HIT',
     });
     res.end(hit.buf);
@@ -216,6 +225,7 @@ async function handleImage(req, res, url) {
     'Content-Type': type,
     'Content-Length': buf.length,
     'Cache-Control': 'public, max-age=86400',
+    'Access-Control-Allow-Origin': '*',
     'X-Cache': 'MISS',
   });
   res.end(buf);
@@ -500,21 +510,40 @@ async function apiDetails(url) {
 const SUB_META_TTL_MS = 5 * 60 * 1000;
 let subMetaCache = { at: 0, wsDir: '', map: null };
 
+/**
+ * 订阅列表的元数据（标题 / 预览图 / 文件大小）。
+ *
+ * 两处针对性修改：
+ *
+ * 1. **按"缺失的 id"增量补，而不是命中缓存就整份返回。**
+ *    旧写法只比对 wsDir 和时间就直接返回整个 map。5 分钟内新订阅的作品
+ *    根本不在那个 map 里，`map.get(id)` 得到 undefined，界面就显示
+ *    「(未能读取标题)」—— 用户看到的是"刚订阅的作品标题凭空消失"。
+ *    现在先算出 missing，只为缺的 id 发请求；全命中时一个上游请求都不发。
+ *
+ * 2. **各批并行，而不是 for + await 串行。**
+ *    GetPublishedFileDetails 一次最多 100 个 id（见 steamApi.getDetails）。
+ *    185 个订阅 = 2 批，旧写法是两次串行往返；并行后一波打完，省 1~2 秒。
+ */
 async function loadSubscribedMeta(wsDir, ids) {
-  if (subMetaCache.map && subMetaCache.wsDir === wsDir && Date.now() - subMetaCache.at < SUB_META_TTL_MS) {
-    return subMetaCache.map;
-  }
+  const fresh =
+    subMetaCache.map && subMetaCache.wsDir === wsDir && Date.now() - subMetaCache.at < SUB_META_TTL_MS;
+  // 复制一份再改：返回的 map 会被下面写成新缓存，不能就地污染旧快照
+  const map = fresh ? new Map(subMetaCache.map) : new Map();
+  const missing = fresh ? ids.filter((id) => !map.has(String(id))) : ids;
+  if (!missing.length) return map;
+
   const ctx = session.currentContext();
-  const map = new Map();
-  for (let i = 0; i < ids.length; i += 100) {
-    const chunk = ids.slice(i, i + 100);
-    try {
-      const r = await steamApi.getDetails(chunk, ctx);
-      (r.items || []).forEach((it) => map.set(String(it.id), it));
-    } catch (e) {
-      /* 某一段失败就用已有的 */
-    }
-  }
+  const chunks = [];
+  for (let i = 0; i < missing.length; i += 100) chunks.push(missing.slice(i, i + 100));
+  // 3 路足够：这条链路是 noLimit 的（不吃社区页 1200ms 限流），但也别一次打太多
+  const results = await pageStore.mapLimit(chunks, 3, (chunk) =>
+    steamApi.getDetails(chunk, ctx).catch(() => null)
+  );
+  results.forEach((r) => {
+    if (r && r.ok) (r.items || []).forEach((it) => map.set(String(it.id), it));
+  });
+
   if (map.size) subMetaCache = { at: Date.now(), wsDir: wsDir, map: map };
   return map;
 }
@@ -541,7 +570,15 @@ async function apiSubscribed(url) {
   const localMap = new Map(local.map((x) => [String(x.id), x]));
   let steamIds = null;
   try {
-    const r = await apiSubscribedIds();
+    /*
+     * 必须走 dedupe('subs', …)，不能直接调 apiSubscribedIds()。
+     *
+     * 旧写法直接调，于是 /api/subscribed-ids（路由里套了 dedupe）和本接口
+     * 同时触发时，**同一份订阅列表被完整爬两遍**，还各自再跑一遍元数据补全
+     * —— 两份都在 noLimit 上并发打 Steam，只会让彼此都更慢。
+     * 共用同一个 key 后，无论哪个接口先到，全局只爬一次。
+     */
+    const r = await dedupe('subs', () => apiSubscribedIds());
     if (r && r.ok && Array.isArray(r.ids)) steamIds = r.ids.map(String);
   } catch (e) {
     /* 退回本地库 */
@@ -884,7 +921,9 @@ async function handle(ctx) {
     // 已订阅项目清单（本地库口径：订阅时间 / 搜索 / 排序 / 分页）
     case '/api/subscribed':
       needMethod(['GET']);
-      result = await apiSubscribed(url);
+      // 同样要合并：前端在慢的时候会自己重试，用户也可能连点几次，
+      // 没有合并就是同一条订阅列表被重复爬多次。
+      result = await dedupe('subscribed:' + url.search, () => apiSubscribed(url));
       break;
 
     case '/api/item/subscribe':
@@ -955,4 +994,11 @@ async function handle(ctx) {
   return ok(res, result);
 }
 
-module.exports = { handle, isAllowedImageHost, imageStats, IMAGE_CACHE, warmupStatusExtras };
+module.exports = {
+  handle,
+  handleImage,
+  isAllowedImageHost,
+  imageStats,
+  IMAGE_CACHE,
+  warmupStatusExtras,
+};

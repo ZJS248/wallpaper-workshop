@@ -15,6 +15,13 @@
     document.documentElement.classList.add('desktop');
   }
 </script>
+<!--
+  图片代理的端口（后端把 /img 单独跑在另一个端口上，见 server/server.js）。
+  必须用**不带 defer 的同步脚本**放在 head 里：它要赶在所有 defer 脚本之前
+  把 window.WW_IMG_BASE 设好，否则首屏渲染时 util.js 里的 imgSrc 读到的还是
+  undefined，整屏图片会被拼成同源地址，白拆一次端口。
+-->
+<script src="/imgbase.js"></script>
 </head>
 <body>
 

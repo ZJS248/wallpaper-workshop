@@ -6,9 +6,21 @@ dist/
 .cache/electron/
 .cache/electron-builder/
 
+# 打包专用的干净 TEMP（NSIS 在这里解包；见 scripts/build.js 里的注释）
+.build-temp/
+
 # 自检产物（截图 / DOM 快照 / 日志）
 config/shots/
 config/*.log
 
 # 本机配置（含 Steam Cookie / API key，绝不入库）
 config/settings.json
+
+# ---- 以下为 2026-10-01 追加：本机 / 工具产物，不入库 ----
+# 工作区记忆与临时脚本（AI 工具的工作目录，不是项目内容）
+.workbuddy-ai/
+# 本机排障记录（我调试时写的诊断报告，不是项目文档）
+启动失败诊断报告.md
+# 本机启动入口（依赖本机路径，不通用）
+启动桌面版.cmd
+

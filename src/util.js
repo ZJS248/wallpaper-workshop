@@ -177,10 +177,25 @@
         '</svg>'
     );
 
-  /** 图片走后端代理：绕开防盗链与本机 DNS 污染，并复用后端的内存缓存 */
+  /**
+   * 图片走后端代理：绕开防盗链与本机 DNS 污染，并复用后端的内存缓存。
+   *
+   * 端口由后端决定（<script src="/imgbase.js"> 注入 window.WW_IMG_BASE）：
+   * 图片代理**单独跑在另一个端口**上，和接口不是一个 origin。
+   *
+   * 为什么非要分开：浏览器对 HTTP/1.1 的每个 origin 只开 6 条并发连接，
+   * 而一屏 30 张预览图会把 127.0.0.1 的 6 条全占满，接口请求只能排队。
+   * 实测（用户 DevTools 截图）：Connection start「已停止」10.92 秒、
+   * 已发送请求 0.15 毫秒、真正等后端 6.05 秒、总计 16.97 秒 ——
+   * 64% 的时间在排队等连接，Steam 那边其实只花了 6 秒。
+   * 拆成两个 origin 之后各拿各的 6 条，接口不再被图片挤掉。
+   *
+   * 后端没能起独立端口时 WW_IMG_BASE 是空串，自动退回同源 /img，
+   * 行为和从前完全一样（只是慢，不会坏）。
+   */
   function imgSrc(url) {
     if (!url) return '';
-    return '/img?u=' + encodeURIComponent(url);
+    return (global.WW_IMG_BASE || '') + '/img?u=' + encodeURIComponent(url);
   }
 
   /** 防抖 */
