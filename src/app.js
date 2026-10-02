@@ -688,8 +688,10 @@ new Vue({
   _sizeTried: null,
   /** 依赖项（必需物品）查询结果：id → { at, items } */
   _requiredCache: null,
-      /** 订阅 id 集合是否已经拉过一次（它慢，放在列表之后拉） */
+      /** 订阅 id 集合是否已经**成功**拉过一次（它慢，放在列表之后拉） */
       _subsLoaded: false,
+      /** 订阅 id 集合是否正在拉（防重入：这个接口要翻完所有订阅，5~10 秒） */
+      _subsLoading: false,
       /** 订阅角标取不到时提示过一次 */
       _subsWarned: false,
       /** 登录态失效提示过一次 */
@@ -1038,6 +1040,9 @@ new Vue({
     },
 
     async loadSubscribedIds() {
+      // 防重入：要翻完用户所有订阅（5~10 秒），并发重复调没有意义
+      if (this._subsLoading) return;
+      this._subsLoading = true;
       try {
         const r = await api.subscribedIds();
         const map = {};
@@ -1047,21 +1052,37 @@ new Vue({
         this.subscribedIds = map;
         this.subsError = '';
         this.subsListOk = true;
+        /*
+         * ⚠️ 只有**成功**才算"拉过了"。
+         *
+         * 踩过的坑：原来这个标记是在**发起请求之前**就置 true 的，而且全代码没有
+         * 任何地方把它重置。于是"未登录时打开页面 → 标记已加载 → 请求抛错 →
+         * 用户登录 → 守卫看到标记还是 true，永远不会再拉一次"，
+         * 表现就是**已登录但订阅角标一直不出来**（用户报的）。
+         * 现在失败时保持 false，下次加载列表会再试；登录态变化时也会显式重置。
+         */
+        this._subsLoaded = true;
         // 订阅数超过后端一次能翻完的量时，角标不可能全覆盖，如实说明
         if (r.capped) {
           this.showToast(
             '订阅较多（' + this.fmtCount(r.total) + ' 个），已订阅角标只覆盖了前 ' +
-            this.fmtCount(Object.keys(map).length) + ' 个',
+              this.fmtCount(Object.keys(map).length) + ' 个',
             'warn'
           );
         }
       } catch (e) {
         // 取不到角标不致命，但要让用户知道原因（多半是 Steam 登录态过期了）
         this.subsError = e.message || '订阅角标取不到';
+        // 拿不到 Steam 的订阅集合就**别把它当成"已确认没有订阅"** ——
+        // 置 false 让 isSubscribedId 回退到本地库判断，否则所有角标都会消失。
+        this.subsListOk = false;
+        this._subsLoaded = false;
         if (!this._subsWarned) {
           this._subsWarned = true;
           this.showToast('订阅状态取不到（登录态可能已过期）', 'warn');
         }
+      } finally {
+        this._subsLoading = false;
       }
     },
 
@@ -1122,7 +1143,6 @@ new Vue({
         // 订阅角标（要翻完用户所有订阅，5~10 秒）放到列表出来之后再拉，
         // 免得它跟列表抢上游带宽 —— 这就是"订阅接口 9 秒、列表一直转圈"的成因。
         if (!this._subsLoaded) {
-          this._subsLoaded = true;
           this.loadSubscribedIds();
         }
         this.totalCount = data.totalCount || 0;
@@ -1980,11 +2000,23 @@ new Vue({
     async onSessionChanged() {
       await this.loadSession();
       await this.loadStatus();
-      this.loadList({ force: true });
       /*
-       * 登录态变了，顺带把「已订阅」也重拉一次。
+       * 登录态变了 → 「已订阅」角标集合必须重拉。
        *
-       * 「已订阅」那份列表要先爬 Steam 的订阅页才能拿到准确的订阅集合，
+       * 那个集合依赖登录态（未登录时后端回 ok:false，前端直接失败退出），
+       * 而 _subsLoaded 是"已经成功拉过一次"的守卫 —— 如果不在登录态变化时清掉，
+       * loadList 里的守卫会一直跳过它，于是"登录了但订阅角标始终不出来"。
+       * 顺手把"提示过一次"也清掉，让新的失败还能再提示一次。
+       */
+      this._subsLoaded = false;
+      this._subsWarned = false;
+      this.loadList({ force: true });
+      // 不依赖 loadList 是否成功：角标本身也要拉一次（有防重入，不会重复请求）
+      this.loadSubscribedIds();
+      /*
+       * 顺带把「我的订阅」列表也重拉一次。
+       *
+       * 那份列表要先爬 Steam 的订阅页才能拿到准确的订阅集合，
        * 而那一步依赖登录态 —— 旧 Cookie 过期时后端会静默退回本地库
        * （source='local'）。用户重新登录之后如果不重拉，界面上会一直挂着
        * 「Steam 列表不可用」，看着像没登上（用户报的）。

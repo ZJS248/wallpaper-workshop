@@ -368,10 +368,76 @@ async function apiBrowse(url) {
   if (!res.ok) {
     return { ok: false, error: res.reason };
   }
+  // 响应已经拿到了，顺手在后台把下一页预热掉（见 prefetchNextPage 的注释）
+  prefetchNextPage(params, ctx, res);
   return Object.assign({ ok: true }, res, {
     query: params,
     elapsedMs: Date.now() - t0,
   });
+}
+
+/* ------------------------------ 下一页预取 ------------------------------ */
+
+/**
+ * 后台预取"下一页"。
+ *
+ * 为什么需要：实测连续翻页时每页都要**现抓一个上游页**，经本地代理约 1.9 秒
+ * （page 1→5 分别 2.07/1.89/1.99/1.81/1.88 秒，且不随页码增长 —— 靠 LRU 命中，
+ * 每页只多抓 1 页）。用户侧的体感就是"点一下翻页要等两秒"。
+ *
+ * 而下一页要抓的那一页，在用户**读当前页**的这段时间里完全可以先抓回来。
+ * 所以这里在响应返回后立刻在后台预热下一页，等用户真翻过去就是缓存命中。
+ *
+ * 安全性：走的是与真实请求**完全相同**的代码路径（同一个 queryWorkshop、
+ * 同一套缓存键），只是提前调用，因此不会产生第二套数据，
+ * 也不会破坏"冻结前缀"的分页一致性。失败静默放弃 —— 用户真翻页时会自己重试。
+ *
+ * 防打爆：同一筛选组合 20 秒内只预取一次；同一时刻只允许一个预取在跑。
+ * 这样即使用户在一页上反复刷新，也不会把上游请求放大。
+ */
+const PREFETCH_COOLDOWN_MS = 20000;
+const PREFETCH_MAX_CONCURRENT = 1;
+const prefetchState = new Map(); // key -> 上次预取时刻
+let prefetchRunning = 0;
+
+function prefetchNextPage(params, ctx, res) {
+  const page = Number(params.page) || 1;
+  const totalPages = Number(res.totalPages) || 0;
+  // 已经是最后一页（或越界）就没有下一页可预热
+  if (totalPages && page >= totalPages) return;
+
+  const key = [
+    params.sort,
+    params.days,
+    params.search,
+    (params.tags || []).join('|'),
+    (params.orGroups || []).map((g) => g.join('|')).join('||'),
+    (params.excludedTags || []).join('|'),
+    params.pageSize,
+    page,
+  ].join('\u0001');
+
+  const last = prefetchState.get(key) || 0;
+  if (Date.now() - last < PREFETCH_COOLDOWN_MS) return;
+  if (prefetchRunning >= PREFETCH_MAX_CONCURRENT) return;
+
+  prefetchState.set(key, Date.now());
+  if (prefetchState.size > 200) {
+    const first = prefetchState.keys().next();
+    if (!first.done) prefetchState.delete(first.value);
+  }
+
+  prefetchRunning++;
+  // 故意不 await：绝不拖慢当前响应
+  (async () => {
+    try {
+      await steamApi.queryWorkshop(Object.assign({}, params, { page: page + 1 }), ctx);
+    } catch (e) {
+      /* 预取失败无所谓：用户真翻页时会自己重试 */
+    } finally {
+      prefetchRunning--;
+    }
+  })();
 }
 
 async function apiItem(url) {
@@ -556,7 +622,7 @@ async function apiSubscribed(url) {
   // 用户点「刷新」= 强制重新读盘 + 重新拉 Steam 订阅列表（不走任何缓存）
   if (url.searchParams.get('fresh') === '1') {
     wallpaperEngine.clearLocalCaches();
-    subsCache = { at: 0, value: null, idSet: null, failTtl: false, failAt: 0 };
+    subsCache = { at: 0, value: null, idSet: null, failTtl: false, failAt: 0, identity: '' };
   }
 
   /*
@@ -737,16 +803,24 @@ async function apiAuthor(url) {
 }
 
 async function apiSubscribedIds() {
+  const ctx = session.currentContext();
+  /*
+   * 缓存按**登录身份**区分（见 subsCache 的注释）。
+   * 身份不一致（登录 / 换号 / 退出）时旧缓存一律视为未命中，
+   * 否则刚登录会命中"未登录"那份失败缓存，角标出不来。
+   */
+  const identity = sc.parseSteamJwt(ctx.cookie).steamId || '';
+  const sameIdentity = subsCache.identity === identity;
+
   // 5 分钟内直接回缓存（见上面 subsCache 的说明）
-  if (subsCache.value && Date.now() - subsCache.at < SUBS_TTL_MS) {
+  if (sameIdentity && subsCache.value && Date.now() - subsCache.at < SUBS_TTL_MS) {
     return Object.assign({}, subsCache.value, { cached: true });
   }
   // 刚失败过（60 秒内）：直接回上次的失败，别再爬登录墙
-  if (subsCache.failTtl && Date.now() - subsCache.failAt < 60 * 1000) {
+  if (sameIdentity && subsCache.failTtl && Date.now() - subsCache.failAt < 60 * 1000) {
     return Object.assign({}, subsCache.failValue, { cached: true });
   }
   // 失败的缓存短一些（60 秒）：Cookie 过期时没必要每次刷新都去爬一遍登录墙
-  const ctx = session.currentContext();
   const r = await steamApi.getSubscribedIds(ctx);
   const out = {
     ok: r.ok,
@@ -760,9 +834,9 @@ async function apiSubscribedIds() {
     capped: !!r.capped,
   };
   if (out.ok) {
-    subsCache = { at: Date.now(), value: out, idSet: new Set(out.ids), failTtl: false, failAt: 0 };
+    subsCache = { at: Date.now(), value: out, idSet: new Set(out.ids), failTtl: false, failAt: 0, identity };
   } else {
-    subsCache = { at: 0, value: null, idSet: null, failTtl: true, failAt: Date.now(), failValue: out };
+    subsCache = { at: 0, value: null, idSet: null, failTtl: true, failAt: Date.now(), failValue: out, identity };
   }
   return out;
 }
@@ -777,7 +851,14 @@ async function apiSubscribedIds() {
  * 现在：5 分钟内直接回缓存；订阅/退订时增量更新缓存，角标立刻对得上。
  */
 const SUBS_TTL_MS = 5 * 60 * 1000;
-let subsCache = { at: 0, value: null, idSet: null };
+/**
+ * 已订阅集合的缓存。
+ *
+ * `identity` 是这份缓存属于**哪个登录身份**（steamID64，未登录时为空串）。
+ * 必须带上它：否则"未登录时拉过一次（失败/空）→ 用户登录 → 前端重拉"会命中旧缓存
+ * （失败缓存还有 60 秒），角标依然出不来 —— 用户看到的就是"已登录但订阅状态没有"。
+ */
+let subsCache = { at: 0, value: null, idSet: null, identity: '' };
 
 /** 订阅/退订成功后增量改缓存，不用等下次全量刷新 */
 function subsCachePatch(id, subscribe) {

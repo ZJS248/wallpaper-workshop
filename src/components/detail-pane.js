@@ -38,6 +38,17 @@ Vue.component('detail-pane', {
     item() {
       return this.detail && this.detail.item ? this.detail.item : null;
     },
+    /**
+     * 头部在"没有标题可显示"时的占位文字。
+     *
+     * 关闭按钮现在常驻头部（加载/出错/空态也要能关掉），而这三种状态没有标题，
+     * 所以给一行浅色状态字占住左侧位置，让关闭按钮仍然靠右、不至于孤零零贴在左边。
+     */
+    headState() {
+      if (this.loading) return '正在读取…';
+      if (this.error) return this.notFound ? '作品不存在' : '详情不可用';
+      return '详情';
+    },
     author() {
       return (this.detail && this.detail.author) || { steamId: '', name: '', avatar: '' };
     },
@@ -178,6 +189,20 @@ Vue.component('detail-pane', {
   },
   template: `
     <aside class="detail">
+      <!--
+        头部常驻，关闭按钮**在任何状态下都存在**。
+        ⚠️ 以前关闭按钮只写在"已加载"那个分支里，于是
+        「加载中 / 出错 / 空态」三种状态都没有关闭按钮 —— 低配机器上加载可能很久
+        （甚至一直转圈），用户就被硬生生卡住、关不掉面板。现在提到分支外面。
+      -->
+      <div class="detail-head">
+        <h2 v-if="item && !loading && !error" :title="item.title">{{ item.title }}</h2>
+        <span v-else class="detail-head-state">{{ headState }}</span>
+        <button class="btn icon detail-close" title="关闭" aria-label="关闭详情" @click="$emit('close')">
+          <svg class="ic"><use href="#i-x"></use></svg>
+        </button>
+      </div>
+
       <div v-if="loading" class="detail-loading">
         <div class="spinner"></div>
         <div>正在读取作品信息…</div>
@@ -195,14 +220,6 @@ Vue.component('detail-pane', {
       </div>
 
       <template v-else>
-        <!-- 粘性头部：滚动时标题和关闭按钮始终在 -->
-        <div class="detail-head">
-          <h2 :title="item.title">{{ item.title }}</h2>
-          <button class="btn icon" title="关闭" aria-label="关闭详情" @click="$emit('close')">
-            <svg class="ic"><use href="#i-x"></use></svg>
-          </button>
-        </div>
-
         <div class="detail-body">
           <div class="detail-preview">
             <img :src="mainImage" :alt="item.title" @error="onPreviewError">

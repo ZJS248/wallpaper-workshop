@@ -731,6 +731,14 @@ input::placeholder, textarea::placeholder { color: #5d6b7a; }
   display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
   word-break: break-word;
 }
+/* 加载 / 出错 / 空态时头部没有标题，用一行浅色状态字占住位置，
+   让关闭按钮仍然靠右对齐、不至于孤零零贴在左边。 */
+.detail-head-state {
+  flex: 1; min-width: 0;
+  color: var(--text-dim); font-size: var(--fs-sm); line-height: var(--lh-title);
+}
+/* 兜底：万一标题/状态字都没渲染，关闭按钮也贴右 */
+.detail-close { margin-left: auto; }
 .detail-body { padding: 12px 14px 28px; }
 
 .detail-preview {
