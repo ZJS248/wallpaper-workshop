@@ -618,7 +618,51 @@ async function queryWorkshop(params, ctx) {
   // ---- 情况 1：没有多选类目（每个类目只勾了一个）→ 一条查询链搞定 ----
   if (!orValues.length) {
     /*
-     * 同样走"冻结前缀"。
+     * 深页**直接取上游那一页**，不再走冻结前缀。
+     *
+     * 为什么：下面的冻结前缀要先把前 N 页凑齐再切片，代价 O(N) —— 翻到第 100 页
+     * 就得抓 100 个上游页（实测第 39 页要 20 秒），所以才有了 MERGE_PREFIX_MAX_ITEMS
+     * 这个上限，副作用是**每页 30 条时第 41 页起直接是空的**。
+     *
+     * 但实测上游本身是 O(1) 的：第 50 / 100 / 200 / 400 / 800 / 1000 页都只要
+     * 约 2.5 秒、每页稳定 30 条 —— Steam 根本没有"只让翻 40 页"这回事，
+     * 那 40 页的墙完全是我们自己造的。所以起点一旦超出前缀上限就退回直接取页：
+     *   - 翻得动了（不再有 40 页的墙）
+     *   - 也快了（~2.5 秒，不随页数增长）
+     * 代价是深页之间可能有少量重叠 —— 但前端本来就有跨页去重
+     * （applyPageDedup / droppedDupes），多选类目那条路径也一直这么做。
+     * 浅页（前 40 页）保持原样走冻结前缀，一致性不受影响。
+     */
+    if (baseStart >= MERGE_PREFIX_MAX_ITEMS) {
+      const r = await runQuery(andTagsAll, baseStart, pageSize, { noLimit: true });
+      if (!r || !r.ok) {
+        return { ok: false, reason: (r && r.reason) || '上游没有返回数据', items: [] };
+      }
+      const builtDeep = buildResult(
+        {
+          ok: true,
+          items: r.items || [],
+          totalCount: r.totalCount,
+          urls: r.urls || [],
+          upstreamPages: r.upstreamPages || 1,
+          failedPages: r.failedPages || 0,
+        },
+        {
+          sort: sort,
+          days: common.days,
+          page: page,
+          pageSize: pageSize,
+          search: common.search,
+          requests: 1,
+          droppedFullGroups: droppedFullGroups,
+        }
+      );
+      if (builtDeep.ok) mergeCacheSet(cacheKey, builtDeep);
+      return builtDeep;
+    }
+
+    /*
+     * 浅页同样走"冻结前缀"。
      *
      * 「最近」是按发布时间倒序的实时列表，而第 N 页 = 上游第 N 页；
      * 上游每翻一页都是**当下**的榜单，于是新发布的壁纸会把后面的整体前移，
@@ -828,28 +872,20 @@ function searchNote(search) {
 /**
  * 深翻页说明。
  *
- * 「无多选类目」和「多选 + 位置键」这两条路径，都是先凑出一份**冻结前缀**再切页
- * （为的是让各页看到同一份数据，避免翻页交叉，见 buildMergeOrder 的注释），
- * 而前缀有上限 MERGE_PREFIX_MAX_ITEMS —— 超过之后切出来就是空的。
- *
- * 实测（pageSize=30、上限 1200 → 第 41 页起）：page 41/42 返回 ok:true + items:[]，
- * 而 totalPages 仍然是 1000，分页条也允许点过去。用户看到一片空白，
- * 完全不知道是"到头了"还是"坏了"。这里把原因说清楚。
- *
- * ⚠️ 不能靠砍 totalPages 来修：带多选类目且排序键不是位置键时（最热门）走的是
- * roundrobin，那条路径**不受这个上限约束**（实测 page 41/45 都能正常返回 30 条），
- * 全局砍会误伤它。
+ * ⚠️ 只在**真的翻到头**时才给，也就是超过 Steam 的硬顶（第 1000 页 / 约 3 万条）。
+ * 别再写成"本应用只能翻到第 40 页"—— 那是我们自己的冻结前缀上限，
+ * 现在超出前缀范围的页会**直接取上游页**（见查询里那段注释），所以翻得动。
+ * 实测上游第 50/100/200/400/800/1000 页都是约 2.5 秒、稳定 30 条。
  */
 function deepPageNote(page, pageSize, itemCount) {
   if (itemCount > 0) return '';
-  const ps = Math.max(1, Number(pageSize) || UPSTREAM_PAGE_SIZE);
+  const ps = Math.max(1, Number(pageSize) || pageStore.UPSTREAM_PAGE_SIZE);
   const from = (Math.max(1, Number(page) || 1) - 1) * ps;
-  if (from < MERGE_PREFIX_MAX_ITEMS) return '';
-  const maxPage = Math.floor(MERGE_PREFIX_MAX_ITEMS / ps);
+  const hardMax = MAX_PAGE * pageStore.UPSTREAM_PAGE_SIZE;
+  if (from < hardMax) return '';
   return (
-    '这个排序最多只能翻到第 ' + maxPage + ' 页（约 ' + MERGE_PREFIX_MAX_ITEMS + ' 条）。' +
-    '再往后要先把前面所有条目都取回来，成本随页数线性增长，所以设了上限。' +
-    '想找更早的内容，建议用时间窗、标签或搜索缩小范围。'
+    'Steam 的浏览页最多翻到第 ' + MAX_PAGE + ' 页（约 ' + hardMax + ' 条），' +
+    '再往后上游就没有数据了。想看得更远，请用时间窗、标签或搜索缩小范围。'
   );
 }
 

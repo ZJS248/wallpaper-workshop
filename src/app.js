@@ -503,22 +503,14 @@ new Vue({
       if (!r) return '';
       return r.totalCountNote || (r.totalCountApprox ? '这个总数只是参考值，Steam 在热门榜下不返回精确数量。' : '');
     },
-    /**
-     * 深翻页上限说明。
-     *
-     * ⚠️ 别再写成"最多翻到第 1000 页" —— 那是 Steam 的硬顶，**不是本应用能翻到的深度**。
-     * 实测：「无多选类目」和「多选 + 位置键」两条路径要先凑一份冻结前缀再切页，
-     * 前缀上限 1200 条，每页 30 条时**第 41 页起就是空的**（见 steamApi 的 deepPageNote）。
-     * 真正翻过头时 deepPageNote 会给出准确说明，这里只负责提前打个招呼。
-     */
+    /** 深翻页上限说明：Steam 浏览页的硬顶（每页 30 条时 1000 页 ≈ 3 万条） */
     pageCapNote() {
       const r = this.lastResult;
       if (!r || !r.cappedAt) return '';
       if (!this.totalPages || this.totalPages < 1000) return '';
       return (
-        'Steam 允许翻到第 1000 页（约 ' + this.fmtCount(r.cappedAt) + ' 条），' +
-        '但本应用为了翻页一致性会先凑一份"冻结前缀"，实际能翻到的深度比这浅得多' +
-        '（每页 30 条时大约到第 40 页），再往后会明确提示。想看得更远请用筛选缩小范围。'
+        'Steam 的浏览页最多翻到第 1000 页（约 ' + this.fmtCount(r.cappedAt) + ' 条），' +
+        '再往后上游就没有数据了。想看得更远，请用时间窗、标签或搜索缩小范围。'
       );
     },
     searchNote() {
@@ -638,7 +630,7 @@ new Vue({
       if (this.pageCapNote && !this.dismissedNotes.cap) {
         out.push({
           key: 'cap', kind: 'info', icon: 'info',
-          text: '深翻页有上限（每页 30 条时约到第 40 页）',
+          text: '最多翻到第 1000 页（约 3 万条）',
           title: this.pageCapNote,
           dismissible: true,
         });
