@@ -2132,8 +2132,17 @@ new Vue({
        * 于是快速在「创意工坊 ↔ 已订阅」之间来回切、或在已订阅页快速翻页时，
        * 慢的那一发会**后到**，把界面上更新的结果覆盖掉（典型的竞态）。
        * 这里用自己的序号（不复用 requestSeq），避免干扰浏览列表的 loading 生命周期。
+       *
+       * ⚠️ 序号必须这样算，不能写 `++this._subsSeq`。
+       * **Vue 2 不会把 data 里下划线开头的属性挂到实例上**（避免与内部属性冲突），
+       * 所以 `_subsSeq: 0` 这个初始值是**拿不到**的 —— `this._subsSeq` 是 undefined，
+       * `++undefined` 得到 NaN，而 `NaN !== NaN` 恒为真，
+       * 于是响应回来后会被下面的"过期守卫"全部挡掉：
+       * 数据丢弃、`loading` 永远停在 true。
+       * 症状就是「接口明明 200 返回了数据，界面上却一直转圈、0 个」。
        */
-      const seq = ++this._subsSeq;
+      const seq = (this._subsSeq || 0) + 1;
+      this._subsSeq = seq;
       const ac = this._newInflight('_inflightSubs');
       this.subs.loading = true;
       this.subs.error = '';
