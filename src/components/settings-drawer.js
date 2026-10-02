@@ -83,7 +83,13 @@ Vue.component('settings-drawer', {
     networkPill() {
       const st = this.status;
       if (!st) return { text: '检测中', kind: 'neutral' };
-      if (st.dns && st.dns.poisoned) return { text: 'DNS 异常', kind: 'error' };
+      if (st.dns && st.dns.poisoned) {
+        // 走代理时解析由代理端完成，污染不影响使用 —— 别把用户吓一跳；
+        // 但也不能假装没事（他自己去 ping 会看到异常），所以降级成 warn 并写明"已绕过"。
+        return st.dns.bypassed
+          ? { text: 'DNS 异常（已绕过）', kind: 'warn' }
+          : { text: 'DNS 异常', kind: 'error' };
+      }
       if (st.proxy) return { text: '走代理', kind: 'ok' };
       return { text: '正常', kind: 'ok' };
     },
@@ -379,12 +385,40 @@ Vue.component('settings-drawer', {
               <table class="kv">
                 <tr><td>出口</td><td>{{ (status && status.proxy) || '直连' }}</td></tr>
                 <tr><td>DNS</td><td>
-                  <span v-if="status && status.dns && status.dns.poisoned" class="pill error">检测到污染</span>
+                  <span v-if="status && status.dns && status.dns.poisoned"
+                        class="pill" :class="status.dns.bypassed ? 'warn' : 'error'">
+                    {{ status.dns.bypassed ? '检测到污染（走代理已绕过）' : '检测到污染' }}
+                  </span>
                   <span v-else class="pill ok">正常</span>
                 </td></tr>
               </table>
-              <div class="hint" v-if="status && status.dns && status.dns.poisoned">
-                系统 DNS 把 steamcommunity.com 解析到了无关地址。程序已自动改用 DoH 解析，一般无需处理。
+
+              <!--
+                结论要一句话说清"污染到底有没有影响、我该做什么"。
+                旧文案写的是"程序已自动改用 DoH 解析，一般无需处理"—— 实测不成立：
+                AliDNS 同样返回污染结果，而旧代码只取第一个非空结果，
+                于是污染地址被直接采用。现在的文案由后端按实际情况生成（dns.verdict）。
+              -->
+              <div class="hint" v-if="status && status.dns && status.dns.verdict"
+                   :class="{ warn: status.dns.poisoned && !status.dns.bypassed }">
+                {{ status.dns.verdict }}
+              </div>
+
+              <table class="kv" v-if="status && status.dns">
+                <tr><td>系统</td><td class="dim">{{ (status.dns.system || []).join(', ') || '—' }}</td></tr>
+                <tr><td>采用</td><td class="dim">{{ (status.dns.doh || []).join(', ') || '—' }}</td></tr>
+              </table>
+
+              <!-- 各解析器分别回了什么：谁在撒谎一眼可见（排障时不用再猜） -->
+              <div class="hint"
+                   v-if="status && status.dns && status.dns.providers && status.dns.providers.length">
+                <div v-for="p in status.dns.providers" :key="p.name" style="margin:2px 0">
+                  <b>{{ p.name }}</b><span class="dim">（{{ p.trusted ? '墙外解析' : '墙内解析' }}）</span>：
+                  <span>{{ (p.raw || []).join(', ') || '无响应' }}</span>
+                  <span v-if="p.poisoned && p.poisoned.length" class="dim">
+                    → 已判定为污染并丢弃
+                  </span>
+                </div>
               </div>
             </div>
           </div>

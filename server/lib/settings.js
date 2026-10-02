@@ -172,11 +172,19 @@ function loadSettings() {
   if (process.env.WW_STEAM_API_KEY) cfg.apiKey = process.env.WW_STEAM_API_KEY;
 
   // 代理：显式配置 > 环境变量 > 父项目 > dsh 代理配置
+  //
+  // ⚠️ WW_PROXY 一旦出现（哪怕是空串）就以它为准。
+  // 旧实现只看 `if (!cfg.proxy)`，于是 `WW_PROXY=` 这种"我要直连"的明确表态
+  // 会被后面的自动探测覆盖掉 —— 用户说直连，程序却偷偷捡了个代理。
+  const wwProxyExplicit = process.env.WW_PROXY !== undefined;
+
   if (!cfg.proxy) {
     const envProxy = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY;
     if (envProxy) {
       cfg.proxy = normalizeProxy(envProxy);
       cfg.proxySource = 'env';
+    } else if (wwProxyExplicit) {
+      cfg.proxySource = 'direct';
     } else {
       const parent = readParentSettings();
       const dsh = readDshProxyConf();
@@ -194,6 +202,12 @@ function loadSettings() {
     cfg.proxy = normalizeProxy(cfg.proxy);
     cfg.proxySource = 'settings';
   }
+
+  /**
+   * 用户是否**明确**指定过出口（代理或直连）。
+   * 供 initAsync 判断要不要再去做"本机代理端口探测" —— 用户说了算的事不替他改。
+   */
+  cfg.proxyExplicit = wwProxyExplicit || cfg.proxySource === 'settings' || cfg.proxySource === 'env';
 
   // Cookie：本项目配置 > 父项目（只读借用）
   let cookieSource = cfg.cookie ? 'settings' : '';
@@ -220,6 +234,76 @@ function loadSettings() {
   return cfg;
 }
 
+/**
+ * 本机常见代理端口（Clash / Mihomo / v2ray / SS 之类客户端的默认值）。
+ * 只探本机回环地址，不对外发探测包。
+ */
+const LOCAL_PROXY_PORTS = [7890, 7891, 7897, 7899, 10808, 10809, 1080, 8889, 2080, 20171];
+
+/**
+ * 探测某个端口上是不是一个**真的能用**的 HTTP 代理。
+ *
+ * 为什么不只看"端口能不能连上"：任何监听端口都能完成 TCP 握手，
+ * 把无关服务误判成代理比不探测更糟（会把请求全导到一个莫名其妙的地方）。
+ * 这里发一个**绝对 URI 形式**的 GET —— 这是 HTTP 代理专有的请求形态，
+ * 普通 Web 服务器收到会当非法请求，只有代理才认得。拿到任何 HTTP 响应即判定为代理。
+ *
+ * @returns {Promise<number>} 可用则返回端口号，否则 0
+ */
+function probeProxyPort(port, timeout) {
+  return new Promise((resolve) => {
+    const http = require('http');
+    let req;
+    try {
+      req = http.request({
+        host: '127.0.0.1',
+        port,
+        method: 'GET',
+        path: 'http://www.gstatic.com/generate_204',
+        headers: { Host: 'www.gstatic.com' },
+        timeout,
+      });
+    } catch (e) {
+      return resolve(0);
+    }
+    let done = false;
+    const finish = (ok) => {
+      if (done) return;
+      done = true;
+      try {
+        req.destroy();
+      } catch (e) {
+        /* 已销毁 */
+      }
+      resolve(ok ? port : 0);
+    };
+    req.on('response', (res) => {
+      res.resume();
+      finish(true);
+    });
+    req.on('timeout', () => finish(false));
+    req.on('error', () => finish(false));
+    req.end();
+  });
+}
+
+/**
+ * 按常见端口并发探测本机代理，返回第一个可用的。
+ *
+ * 为什么需要这一步：旧版自动探测只看"父项目配置"和 `~/.dsh/dsh-proxy-win.conf`。
+ * 实测这两者都不存在时就回退直连 —— 而用户机器上 Clash 明明在 7890 跑着，
+ * 结果整个应用在"直连 + DNS 被污染"下彻底连不上，
+ * 用户侧看到的是"列表一直转圈、也不报错"。
+ *
+ * @returns {Promise<{port:number, url:string}|null>}
+ */
+async function probeLocalProxy() {
+  const hits = await Promise.all(LOCAL_PROXY_PORTS.map((p) => probeProxyPort(p, 1500)));
+  const ports = hits.filter(Boolean).sort((a, b) => a - b);
+  if (!ports.length) return null;
+  return { port: ports[0], url: 'http://127.0.0.1:' + ports[0] };
+}
+
 /** 带端口探测的异步初始化（在 server 启动时调一次） */
 async function initAsync() {
   const cfg = loadSettings();
@@ -228,6 +312,21 @@ async function initAsync() {
     const found = await probeParentApi(Array.from(new Set(bases)));
     if (found) cfg.parentApiBase = found;
   }
+
+  /*
+   * 本机代理探测 —— 只在"确实没配代理、且用户没明确表态"时才做。
+   * 放在这里而不是 loadSettings 里：loadSettings 是同步的，做不了网络探测。
+   * 探测本身很快（并发 + 1.5s 上限），而且只有直连状态才会走这一步。
+   */
+  if (!cfg.proxy && cfg.proxyAuto !== false && !cfg.proxyExplicit) {
+    const found = await probeLocalProxy();
+    if (found) {
+      cfg.proxy = found.url;
+      cfg.proxySource = 'local-probe';
+      console.log('[settings] 未配置代理，但探测到本机代理 ' + found.url + '，已自动启用');
+    }
+  }
+
   _cache = cfg;
   return cfg;
 }
@@ -262,6 +361,7 @@ module.exports = {
   PROJECT,
   SETTINGS_FILE,
   PARENT_CANDIDATES,
+  LOCAL_PROXY_PORTS,
   DEFAULTS,
   loadSettings,
   initAsync,
@@ -270,5 +370,6 @@ module.exports = {
   saveSettings,
   readDshProxyConf,
   readParentSettings,
+  probeLocalProxy,
   normalizeProxy,
 };

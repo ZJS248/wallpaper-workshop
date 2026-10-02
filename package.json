@@ -10,6 +10,7 @@
     "dev": "node server.js",
     "icons": "node scripts/make-icons.js",
     "selftest": "node scripts/selftest.js",
+    "debug:dns": "node scripts/debug-dns.js",
     "electron": "electron .",
     "desktop": "node scripts/run-desktop.js",
     "desktop:wait": "node scripts/run-desktop.js --wait",

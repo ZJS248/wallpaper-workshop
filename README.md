@@ -816,10 +816,28 @@ iframe.contentWindow.postMessage(
 |---|---|---|
 | `WW_PORT` | 监听端口 | `9391` |
 | `WW_HOST` | 监听地址 | `0.0.0.0` |
-| `WW_PROXY` | HTTP 代理，空字符串=直连 | 自动（父项目 → `~/.dsh/dsh-proxy-win.conf`） |
+| `WW_PROXY` | HTTP 代理。**设成空字符串 = 强制直连，不再自动探测** | 自动（见下） |
 | `WW_COOKIE` | Steam Cookie | 自动（父项目文件 → 空） |
 | `WW_REFRESH_TOKEN` | steam-session 刷新令牌（可自动续期） | 空 |
 | `WW_STEAM_API_KEY` | Steam Web API key（只为把作者 steamID 换成昵称） | 空 |
+
+**代理的自动探测顺序**（前一条拿到就不再往后走）：
+
+1. `WW_PROXY` 环境变量（**出现即生效，哪怕是空串** —— 空串代表"我要直连"）
+2. `config/settings.json` 里的 `proxy`
+3. `HTTPS_PROXY` / `HTTP_PROXY` 环境变量
+4. 父项目 `HTML-website/config/wallpaper/settings.json` 的 `httpsProxy` / `httpProxy`
+5. `~/.dsh/dsh-proxy-win.conf`
+6. **本机常见代理端口探测**：`7890 / 7891 / 7897 / 7899 / 10808 / 10809 / 1080 / 8889 / 2080 / 20171`
+   （Clash / Mihomo / v2ray 之类的默认值；`proxySource` 会标成 `local-probe`）
+7. 都不成立 → 直连
+
+第 6 条是后补的。之前只有 1~5，本机没装 dsh、也没有父项目时就直接回退直连 ——
+于是"Clash 明明在 7890 跑着，应用却直连 + 撞上 DNS 污染"，表现为一直转圈、不报错。
+
+> 探测不只是"端口能不能连上"：任何监听端口都能完成 TCP 握手，
+> 会把无关服务误判成代理。这里会**真的发一个绝对 URI 形式的 GET**
+> （HTTP 代理专有的请求形态），拿到响应才算数。
 
 `config/settings.json`（可选，运行时会自动创建/更新）：
 
@@ -843,12 +861,43 @@ iframe.contentWindow.postMessage(
 
 ### 7.1 网络层
 
-- **系统 DNS 被污染**。本机 `steamcommunity.com` 解析到 `65.49.68.152` 这种与 Steam
-  无关的地址（还有一个本该 NXDOMAIN 却返回的 `192.5.6.30` 根域名服务器地址）。
+- **系统 DNS 被污染**。本机 `steamcommunity.com` 解析到 `157.240.16.50` / `66.220.146.94`
+  这种 Facebook 的地址（还有一个本该 NXDOMAIN 却返回的 `192.5.6.30` 根域名服务器地址）。
   后果是"HTTP 200 但内容是无关页面"，非常难查。
-  处理：走代理时 **CONNECT 里传域名**（让代理端解析）；直连时用 **DoH**
-  （AliDNS / Cloudflare / Google 依次尝试）+ 系统 DNS 兜底。
+  处理：走代理时 **CONNECT 里传域名**（让代理端解析）；直连时用 **DoH** 解析。
   `GET /api/status` 会给出 `dns.poisoned` 判定，设置页也会显示。
+
+- **⚠️ DoH 曾经"看起来修好了、其实没有"**（2026-10-02 修）。
+  旧实现把 AliDNS 排在端点列表第一位，并且**拿到第一个非空结果就采用**。
+  实测 AliDNS 对这类域名同样返回被污染的答案，而它"有结果"，
+  于是 Cloudflare / Google 永远不会被尝试，污染地址被缓存下来直接拿去建连 ——
+  用户侧就是"请求一直挂着、不报错、也不出图"。实测对照：
+
+  | 解析器 | 返回 | 判定 |
+  |---|---|---|
+  | 系统 DNS | `157.240.16.50` / `66.220.146.94` | 污染（Facebook 段） |
+  | AliDNS（直连） | `67.228.235.93` | 污染（SoftLayer 段） |
+  | AliDNS（经代理） | `103.246.246.144` | **仍然污染** |
+  | Cloudflare（经代理） | `23.37.16.240` | 真实（Akamai） |
+  | Google（经代理） | `23.37.16.240` | 真实（Akamai） |
+
+  关键结论：**把 DoH 查询走代理并不能修好 AliDNS** —— 污染发生在它自己的递归解析器内部，
+  而不是我们到它的那段链路上。所以判据只能是"**解析器本身在不在墙外**"。
+
+  现在 `dnsResolve.js` 的做法：
+  1. **并发问所有端点**，只采用 `trusted`（墙外）解析器的答案；
+  2. 已知污染地址段（Facebook / Yahoo / SoftLayer / 根服务器等）直接丢弃；
+  3. 拿不到可信答案时，用系统 DNS 的候选地址做 **TLS 证书校验** ——
+     拿候选 IP 当目标、用目标域名做 SNI 握手，证书过不了就说明这个 IP 根本不是该域名。
+     这是唯一无法被伪造的判据（污染答案的 IP 段位每次都在换，靠枚举 IP 段追不上）；
+  4. 仍然拿不到 → **明确报错**，绝不硬连。错误信息直接告诉用户去配代理。
+
+  另外两点：抢到可信答案就立刻返回（不等被墙的端点挂到超时）；
+  失败结果缓存 60 秒，避免配置错误时每个请求都重等一遍。
+
+- **墙内直连是救不回来的**。实测即使 DNS 解析正确，直连真实 Akamai IP
+  也会被 `ECONNRESET`（封锁同时作用于 SNI，不只是 DNS）。所以这类网络下
+  **必须走代理**，DNS 修复的意义在于"快速失败并说清原因"，而不是"让直连能用"。
 - **CONNECT 隧道必须显式带 `Host` 头**，否则 Akamai 直接回
   `400 Invalid URL`（页面里连 `window.SSR` 都没有）。
 - **`https.request` + `createConnection` 会 socket hang up**：Agent 会再折腾一次握手。
@@ -1016,7 +1065,7 @@ iframe.contentWindow.postMessage(
 | `node scripts/check-image-bytes.js` | 校验 `/img` 返回的字节是不是**合法图片**（只看长度会被骗） |
 | `node scripts/debug-config.js` | 打印配置探测结果（父项目 / 代理 / Cookie 来源 / JWT 绑定 IP） |
 | `node scripts/debug-detail.js [id]` | 抓一个作品详情并打印解析结果 |
-| `node scripts/debug-dns.js [id]` | 验证"代理端解析域名"能拿到真正的详情页 |
+| `node scripts/debug-dns.js [host] [proxy]` | **DNS 排障**：各解析器分别回了什么、谁被判定污染、证书校验结果、最终采用了哪个地址 |
 | `node scripts/debug-image.js` | 对比图片请求的几种头组合 |
 | `node scripts/debug-url.js [--fetch]` | 打印生成的浏览页 URL（`--fetch` 会真打一次） |
 | `node scripts/debug-author-names.js` | 看浏览页 SSR 里有哪些作者信息可用 |
