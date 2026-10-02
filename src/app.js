@@ -779,7 +779,7 @@ new Vue({
       if (e.key !== 'Escape') return;
       if (this.confirm) { this.onConfirmCancel(); return; }
       if (this.notesOpen) { this.notesOpen = false; return; }
-      if (this.selected) { this.selected = null; this.detail = null; this.related = null; }
+      if (this.selected) { this.closeDetail(); }
     },
     /** 打开设置抽屉；section 为空时由抽屉自己挑（未登录 → 账号） */
     openSettings(section) {
@@ -1216,6 +1216,27 @@ new Vue({
       this._inflight = null;
     },
 
+    /**
+     * 关闭详情面板。
+     *
+     * ⚠️ 以前各处关闭都只写 `selected = null`，**不取消在途请求**。
+     * 详情那一发（/api/item）在低配机器 + 代理下要好几秒，用户等不及点关闭时：
+     *  - 它会继续跑完，白占 Steam 的限流额度（同 host 每 1200ms 才放一个请求），
+     *    连带把随后的列表/详情请求往后挤；
+     *  - `detailLoading` 会**一直停在 true**（selectItem 的 finally 里有
+     *    `if (this.selected && this.selected.id === id)` 守卫，关闭后不再成立）。
+     * 所以关闭统一走这里：取消请求 → 清选中态 → 复位加载与错误标记。
+     */
+    closeDetail() {
+      this.abortInflight();
+      this.selected = null;
+      this.detail = null;
+      this.related = null;
+      this.detailLoading = false;
+      this.detailError = '';
+      this.detailNotFound = false;
+    },
+
     async loadAuthor(force) {
       if (!this.authorView) return;
       this.loading = true;
@@ -1593,7 +1614,7 @@ new Vue({
         avatar: payload.avatar || item.creatorAvatar || '',
       };
       this.filters.page = 1;
-      this.selected = null;
+      this.closeDetail();
       this.detail = null;
       this.loadAuthor();
     },
@@ -1720,7 +1741,7 @@ new Vue({
 
     reloadDetail() {
       const it = this.selected;
-      this.selected = null;
+      this.closeDetail();
       this.selectItem(it);
     },
 
@@ -2042,7 +2063,7 @@ new Vue({
     openSubscribed() {
       if (this.mode === 'browse') this.snapshotBrowseState();
       this.mode = 'subscribed';
-      this.selected = null;
+      this.closeDetail();
       this.detail = null;
       this.related = null;
       this.loadSubscribed();
