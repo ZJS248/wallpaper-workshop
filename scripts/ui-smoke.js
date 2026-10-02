@@ -100,6 +100,31 @@ function check(ok, label, extra) {
   await page.waitForTimeout(400);
   check((await page.locator('.detail-body').count()) === 0, '点关闭后面板确实收起');
 
+  // 翻页要回到顶部。
+  // 这里踩过坑：滚动容器是外层 `.content`（overflow-y:auto），**不是** `.grid`
+  // （`.grid` 只是 display:grid，没有 overflow，对它设 scrollTop 是空操作）。
+  // 曾经 scrollToTop() 拿的是挂在 .grid 上的 ref，于是翻页根本不回顶部。
+  const scrollBox = await page.evaluate(() => {
+    const c = document.querySelector('.content');
+    return c ? { sh: c.scrollHeight, ch: c.clientHeight } : null;
+  });
+  if (scrollBox && scrollBox.sh > scrollBox.ch) {
+    await page.evaluate(() => {
+      document.querySelector('.content').scrollTop = document.querySelector('.content').scrollHeight;
+    });
+    await page.waitForTimeout(500);
+    const before = await page.evaluate(() => document.querySelector('.content').scrollTop);
+    const p2 = page.locator('.pg').filter({ hasText: /^2$/ }).first();
+    if (await p2.count()) {
+      await p2.click();
+      await page.waitForTimeout(8000);
+      const after = await page.evaluate(() => document.querySelector('.content').scrollTop);
+      check(after < 50, '翻页后滚动条回到顶部', before + ' → ' + after);
+    }
+  } else {
+    console.log('  - 内容不够长，跳过翻页滚动检查');
+  }
+
   // 控制台不该有 JS 报错（favicon / 图片网络错误不算）
   const real = errors.filter((t) => !/favicon|net::ERR_/.test(t));
   check(real.length === 0, '无 JS 控制台错误', real.slice(0, 3).join(' | '));

@@ -1489,8 +1489,26 @@ new Vue({
       if (this.page < this.totalPages) this.goPage(this.page + 1);
     },
 
+    /**
+     * 列表的滚动容器。
+     *
+     * ⚠️ 是外层 `.content`（`overflow-y:auto`），**不是** `.grid`。
+     * `.grid` 只是 `display:grid`，没有任何 overflow —— 对它设 scrollTop 是**空操作**。
+     *
+     * 这里踩过坑：`scrollToTop()` 原本拿的是 `$refs.gridScroll`（那个 ref 挂在 .grid 上），
+     * 于是翻页**根本不回到顶部**；而 `getScrollTop/setScrollTop` 拿的是
+     * `document.querySelector('.content')`，是对的。两个口径不一致，
+     * 结果「创意工坊」和「已订阅」两个视图翻页都不重置滚动条（用户报的），
+     * 并且"从作者页返回时恢复滚动位置"也一直恢复成 0。现在统一走这里。
+     *
+     * 同一时刻只会渲染一个 `.content`（浏览 / 已订阅 是 v-if / v-else）。
+     */
+    scrollEl() {
+      return this.$refs.content || document.querySelector('.content') || null;
+    },
+
     scrollToTop() {
-      const el = this.$refs.gridScroll;
+      const el = this.scrollEl();
       if (el) el.scrollTop = 0;
     },
 
@@ -1702,13 +1720,13 @@ new Vue({
       this.loadList();
     },
 
-    /** 列表滚动容器（作者页返回时用来还原位置） */
+    /** 列表滚动位置（作者页返回时用来还原） */
     getScrollTop() {
-      const el = this.$refs.content || document.querySelector('.content');
+      const el = this.scrollEl();
       return el ? el.scrollTop : 0;
     },
     setScrollTop(top) {
-      const el = this.$refs.content || document.querySelector('.content');
+      const el = this.scrollEl();
       if (el) el.scrollTop = top;
     },
 
