@@ -1069,6 +1069,8 @@ iframe.contentWindow.postMessage(
 | `node scripts/check-image-bytes.js` | 校验 `/img` 返回的字节是不是**合法图片**（只看长度会被骗） |
 | `node scripts/debug-config.js` | 打印配置探测结果（父项目 / 代理 / Cookie 来源 / JWT 绑定 IP） |
 | `node scripts/debug-detail.js [id]` | 抓一个作品详情并打印解析结果 |
+| `node scripts/check-templates.js` | 校验所有组件模板是否合法（模板写在 JS 反引号里，`node --check` 看不出结构错） |
+| `node scripts/ui-smoke.js <baseUrl>` | **真实浏览器冒烟检查**：卡片是否渲染、缩略图有没有破图、`content-visibility` 是否生效、详情面板加载态能否关闭、有无 JS 报错。截图落在 `scripts/ui-shots/`。**需先 `npm i playwright-core`**；用系统已装的 Edge，不必下载 Chromium |
 | `node scripts/debug-dns.js [host] [proxy]` | **DNS 排障**：各解析器分别回了什么、谁被判定污染、证书校验结果、最终采用了哪个地址 |
 | `node scripts/debug-image.js` | 对比图片请求的几种头组合 |
 | `node scripts/debug-url.js [--fetch]` | 打印生成的浏览页 URL（`--fetch` 会真打一次） |

@@ -12,6 +12,7 @@ dist/
 # 自检产物（截图 / DOM 快照 / 日志）
 config/shots/
 config/*.log
+scripts/ui-shots/
 
 # 本机配置（含 Steam Cookie / API key，绝不入库）
 config/settings.json
