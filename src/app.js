@@ -681,7 +681,21 @@ new Vue({
    * 非响应式内部状态：AbortController 与防抖函数都不该进 Vue 的响应式系统
    * （Vue 2 会深度遍历 data，把 AbortController 包成 observed 对象，属于白白开销）。
    */
-  _inflight: null,
+  /*
+   * 在途请求按用途**分开三个槽位**。
+   *
+   * ⚠️ 原来只有一个 `_inflight`，列表和详情都往里放，于是互相误伤：
+   *   - 翻页会顺带掐掉在途的**详情**请求 → 详情面板静默退回"选择一张壁纸查看详情"；
+   *   - 在详情面板里点"相关壁纸"会掐掉在途的**列表**请求
+   *     （网格加载时虽然 .grid.dim 有 pointer-events:none 挡住了卡片，
+   *      但详情面板里的相关缩略图仍可点，这条路径是通的）。
+   * 分开之后各取消各的，互不影响。
+   */
+  _inflight: null,        // 浏览 / 作者列表
+  _inflightDetail: null,  // 作品详情
+  _inflightSubs: null,    // 已订阅清单
+  /** 已订阅清单自己的序号（不复用 requestSeq，免得干扰列表的 loading 生命周期） */
+  _subsSeq: 0,
   _debouncedSearch: null,
   _debouncedReload: null,
   /** 已经问过"大小"的 id → 时间戳（非响应式；失败过的不在 5 分钟内反复问） */
@@ -1128,9 +1142,7 @@ new Vue({
       }
       this.error = '';
       const seq = ++this.requestSeq;
-      this.abortInflight();
-      const ac = typeof AbortController !== 'undefined' ? new AbortController() : null;
-      this._inflight = ac;
+      const ac = this._newInflight('_inflight');
       try {
         // 整组全选的类目（类型/年龄/标签 全勾）在语义上等于不筛，后端也会丢，
         // 这里先剔掉 —— 否则 URL 会挂上 40 多个值，白让上游多跑一趟。
@@ -1204,16 +1216,31 @@ new Vue({
       this.loadList();
     },
 
-    /** 取消上一发在途请求：切筛选时旧结果已经没用了，留着只会占 Steam 的限流额度 */
-    abortInflight() {
-      if (this._inflight && typeof this._inflight.abort === 'function') {
+    /**
+     * 取消某一类在途请求。
+     *
+     * @param {string} [slot] 槽位名：'_inflight'（列表，默认）/ '_inflightDetail' /
+     *                        '_inflightSubs'。省略即取消"列表"那一发，兼容旧调用点。
+     */
+    abortInflight(slot) {
+      const key = slot || '_inflight';
+      const ac = this[key];
+      if (ac && typeof ac.abort === 'function') {
         try {
-          this._inflight.abort();
+          ac.abort();
         } catch (e) {
           /* 忽略 */
         }
       }
-      this._inflight = null;
+      this[key] = null;
+    },
+
+    /** 造一个 AbortController 并占住指定槽位（浏览器不支持时返回 null，逻辑照常跑） */
+    _newInflight(slot) {
+      this.abortInflight(slot);
+      const ac = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      this[slot] = ac;
+      return ac;
     },
 
     /**
@@ -1225,10 +1252,12 @@ new Vue({
      *    连带把随后的列表/详情请求往后挤；
      *  - `detailLoading` 会**一直停在 true**（selectItem 的 finally 里有
      *    `if (this.selected && this.selected.id === id)` 守卫，关闭后不再成立）。
-     * 所以关闭统一走这里：取消请求 → 清选中态 → 复位加载与错误标记。
+     * 所以关闭统一走这里：取消详情请求 → 清选中态 → 复位加载与错误标记。
+     *
+     * 注意只取消**详情**那一发，不碰列表 —— 关掉详情不该影响正在翻的页。
      */
     closeDetail() {
-      this.abortInflight();
+      this.abortInflight('_inflightDetail');
       this.selected = null;
       this.detail = null;
       this.related = null;
@@ -1247,8 +1276,17 @@ new Vue({
       this.totalCount = 0;
       this.totalPages = 0;
       const seq = ++this.requestSeq;
+      // 作者页也是"列表"那一类：切过来就该掐掉上一发（可能是全站浏览的请求），
+      // 否则它跑完还占着限流额度，把作者页往后挤。
+      const ac = this._newInflight('_inflight');
       try {
-        const data = await api.author(this.authorView.steamId, this.filters.page, this.filters.pageSize, this.authorView);
+        const data = await api.author(
+          this.authorView.steamId,
+          this.filters.page,
+          this.filters.pageSize,
+          this.authorView,
+          ac ? ac.signal : undefined
+        );
         if (seq !== this.requestSeq) return;
         this.items = data.items || [];
         this.loadFileSizes(this.items);
@@ -1266,11 +1304,16 @@ new Vue({
         }
       } catch (e) {
         if (seq !== this.requestSeq) return;
+        // 用户主动取消（cancelLoad）不该被当成错误弹出来
+        if (e && e.name === 'AbortError') return;
         this.error = e.message || String(e);
         if (this.items.length) this.staleFrom = this.page;
         this.scheduleRetry();
       } finally {
-        if (seq === this.requestSeq) this.loading = false;
+        if (seq === this.requestSeq) {
+          this.loading = false;
+          this._inflight = null;
+        }
       }
     },
 
@@ -1670,10 +1713,10 @@ new Vue({
       this.relatedError = '';
       this.relatedLoading = false;
       this.detailLoading = true;
-      // 详情请求也要能取消：快速连点不同卡片时，旧的详情请求会占限流额度
-      this.abortInflight();
-      const ac = typeof AbortController !== 'undefined' ? new AbortController() : null;
-      this._inflight = ac;
+      // 详情请求也要能取消：快速连点不同卡片时，旧的详情请求会占限流额度。
+      // 只取消上一发**详情**，不碰列表 —— 否则在详情面板里点"相关壁纸"
+      // 会把正在翻的那一页掐掉（旧实现共用一个槽位，就是这个毛病）。
+      const ac = this._newInflight('_inflightDetail');
       const id = item.id;
       const hints = {
         name: item.creatorName || '',
@@ -2070,16 +2113,30 @@ new Vue({
     },
 
     async loadSubscribed(fresh) {
+      /*
+       * 已订阅清单也是"列表"那一类，同样要能取消、也要防过期响应。
+       *
+       * 旧实现三样都没有：不接 AbortController、没有序号守卫。
+       * 于是快速在「创意工坊 ↔ 已订阅」之间来回切、或在已订阅页快速翻页时，
+       * 慢的那一发会**后到**，把界面上更新的结果覆盖掉（典型的竞态）。
+       * 这里用自己的序号（不复用 requestSeq），避免干扰浏览列表的 loading 生命周期。
+       */
+      const seq = ++this._subsSeq;
+      const ac = this._newInflight('_inflightSubs');
       this.subs.loading = true;
       this.subs.error = '';
       try {
-        const r = await api.subscribed({
-          page: this.subs.page,
-          pageSize: this.subs.pageSize,
-          search: this.subs.search,
-          sort: this.subs.sort,
-          fresh: !!fresh,
-        });
+        const r = await api.subscribed(
+          {
+            page: this.subs.page,
+            pageSize: this.subs.pageSize,
+            search: this.subs.search,
+            sort: this.subs.sort,
+            fresh: !!fresh,
+          },
+          ac ? ac.signal : undefined
+        );
+        if (seq !== this._subsSeq) return;
         this.subs.items = r.items || [];
         this.subs.totalCount = r.totalCount || 0;
         this.subs.totalPages = r.totalPages || 1;
@@ -2090,9 +2147,14 @@ new Vue({
         // 列表以 Steam 为准时，顺手把"已订阅"角标也同步过来（取消订阅能立刻反映）
         if (r.source === 'steam') this.loadSubscribedIds();
       } catch (e) {
+        if (seq !== this._subsSeq) return;
+        if (e && e.name === 'AbortError') return;
         this.subs.error = e.message || String(e);
       } finally {
-        this.subs.loading = false;
+        if (seq === this._subsSeq) {
+          this.subs.loading = false;
+          this._inflightSubs = null;
+        }
       }
     },
 

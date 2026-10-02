@@ -144,8 +144,11 @@
         body: { id: String(id), monitor: Number(monitor) || 0, force: !!force },
       });
     },
-    /** 已订阅项目清单（本地库口径：订阅时间 / 搜索 / 排序 / 分页） */
-    subscribed: function (opts) {
+    /**
+     * 已订阅项目清单（本地库口径：订阅时间 / 搜索 / 排序 / 分页）
+     * @param {AbortSignal} [signal] 切换视图 / 快速翻页时用来取消上一发
+     */
+    subscribed: function (opts, signal) {
       const o = opts || {};
       const sp = [];
       if (o.page) sp.push('page=' + o.page);
@@ -154,9 +157,9 @@
       if (o.sort) sp.push('sort=' + encodeURIComponent(o.sort));
       // fresh=1：绕过服务端缓存，重新读盘 + 重新拉 Steam 订阅列表（「刷新」按钮用）
       if (o.fresh) sp.push('fresh=1');
-      return request('/api/subscribed' + (sp.length ? '?' + sp.join('&') : ''));
+      return request('/api/subscribed' + (sp.length ? '?' + sp.join('&') : ''), { signal: signal });
     },
-    author: function (id, page, pageSize, creator) {
+    author: function (id, page, pageSize, creator, signal) {
       // 把已知的作者昵称/头像一起带上：浏览页的 PlayerLinkDetails 本来就给了，
       // 这样后端不用再为"取个名字"多打一次 Steam（个人页本身不含作者昵称）。
       const sp = new URLSearchParams({
@@ -166,7 +169,7 @@
       });
       if (creator && creator.name) sp.set('name', creator.name);
       if (creator && creator.avatar) sp.set('avatar', creator.avatar);
-      return request('/api/author?' + sp.toString());
+      return request('/api/author?' + sp.toString(), { signal: signal });
     },
     subscribedIds: function () {
       return request('/api/subscribed-ids');
