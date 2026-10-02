@@ -21,6 +21,14 @@ const API = 'https://api.steampowered.com';
 /** 进程内短缓存：steamID -> {name, avatar, profileUrl}，10 分钟 */
 const SUMMARY_CACHE = new Map();
 const SUMMARY_TTL = 10 * 60 * 1000;
+/**
+ * 容量上限。
+ *
+ * 原来只有 TTL，而且是"只在读取时惰性过期" —— 没被再次读到的条目会一直留着。
+ * 单个条目很小（一个昵称 + 头像 URL），但作者数是随浏览不断增长的，长期挂着不划算。
+ * 超出就丢最旧的（Map 的迭代顺序 = 插入顺序，配合下面的"先删再插"够用）。
+ */
+const SUMMARY_MAX = 500;
 
 function cacheGet(id) {
   const hit = SUMMARY_CACHE.get(id);
@@ -33,7 +41,12 @@ function cacheGet(id) {
 }
 
 function cacheSet(id, value) {
+  // 先删再插：保证 Map 的迭代顺序就是"最近写入"，淘汰时才丢得对
+  SUMMARY_CACHE.delete(id);
   SUMMARY_CACHE.set(id, { at: Date.now(), value });
+  while (SUMMARY_CACHE.size > SUMMARY_MAX) {
+    SUMMARY_CACHE.delete(SUMMARY_CACHE.keys().next().value);
+  }
 }
 
 /** 校验 API key 是否可用（顺便把结果缓存起来，避免每次问） */

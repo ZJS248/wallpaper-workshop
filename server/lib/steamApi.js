@@ -727,6 +727,8 @@ async function queryWorkshop(params, ctx) {
       mergeMaxValues: MERGE_MAX_VALUES,
       mergePrefix: state.need,
       searchNote: searchNote(common.search),
+      // 同 buildResult：这条路径也用冻结前缀，翻过头要给说法
+      pageNote: deepPageNote(page, pageSize, mergedItems.length),
       items: mergedItems,
       mergeFiltered: before - mergedItems.length,
     };
@@ -823,6 +825,34 @@ function searchNote(search) {
 }
 
 /** 把一次组装结果整理成统一返回结构 */
+/**
+ * 深翻页说明。
+ *
+ * 「无多选类目」和「多选 + 位置键」这两条路径，都是先凑出一份**冻结前缀**再切页
+ * （为的是让各页看到同一份数据，避免翻页交叉，见 buildMergeOrder 的注释），
+ * 而前缀有上限 MERGE_PREFIX_MAX_ITEMS —— 超过之后切出来就是空的。
+ *
+ * 实测（pageSize=30、上限 1200 → 第 41 页起）：page 41/42 返回 ok:true + items:[]，
+ * 而 totalPages 仍然是 1000，分页条也允许点过去。用户看到一片空白，
+ * 完全不知道是"到头了"还是"坏了"。这里把原因说清楚。
+ *
+ * ⚠️ 不能靠砍 totalPages 来修：带多选类目且排序键不是位置键时（最热门）走的是
+ * roundrobin，那条路径**不受这个上限约束**（实测 page 41/45 都能正常返回 30 条），
+ * 全局砍会误伤它。
+ */
+function deepPageNote(page, pageSize, itemCount) {
+  if (itemCount > 0) return '';
+  const ps = Math.max(1, Number(pageSize) || UPSTREAM_PAGE_SIZE);
+  const from = (Math.max(1, Number(page) || 1) - 1) * ps;
+  if (from < MERGE_PREFIX_MAX_ITEMS) return '';
+  const maxPage = Math.floor(MERGE_PREFIX_MAX_ITEMS / ps);
+  return (
+    '这个排序最多只能翻到第 ' + maxPage + ' 页（约 ' + MERGE_PREFIX_MAX_ITEMS + ' 条）。' +
+    '再往后要先把前面所有条目都取回来，成本随页数线性增长，所以设了上限。' +
+    '想找更早的内容，建议用时间窗、标签或搜索缩小范围。'
+  );
+}
+
 function buildResult(res, meta) {
   if (!res.ok) {
     return {
@@ -862,6 +892,8 @@ function buildResult(res, meta) {
     mergeUpstreamPages: res.upstreamPages || 0,
     failedPages: res.failedPages || 0,
     searchNote: searchNote(meta.search),
+    // 翻过了可浏览深度时如实说明，别让用户对着空白页猜（见 deepPageNote）
+    pageNote: deepPageNote(page, pageSize, (res.items || []).length),
     items: res.items || [],
   };
 }

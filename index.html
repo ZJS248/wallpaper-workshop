@@ -205,14 +205,29 @@
 
       <div v-else-if="!visibleItems.length" class="empty">
         <svg class="ic empty-ic"><use href="#i-inbox"></use></svg>
+        <!--
+          翻过可浏览深度时要**说清原因**。以前无论什么原因都显示
+          「没有符合条件的作品 / 试试少选几个标签」—— 而翻太深这种情况筛选根本没问题，
+          那句提示会把人往错误方向带。
+        -->
         <div class="empty-title" v-if="mode === 'author'">该作者没有公开的创意工坊作品</div>
+        <div class="empty-title" v-else-if="pageNote">翻到这里没有内容了</div>
         <div class="empty-title" v-else>没有符合条件的作品</div>
-        <div class="empty-sub" v-if="blockedOnPage">本页 {{ blockedOnPage }} 个来自你屏蔽的作者</div>
+
+        <div class="empty-sub" v-if="pageNote">{{ pageNote }}</div>
+        <div class="empty-sub" v-else-if="blockedOnPage">本页 {{ blockedOnPage }} 个来自你屏蔽的作者</div>
         <div class="empty-sub" v-else-if="mode !== 'author'">试试少选几个标签</div>
+
         <div class="empty-actions">
-          <button class="btn" v-if="blockedOnPage" @click="clearBlockedCreators">清空屏蔽名单</button>
-          <button class="btn" v-if="mode === 'author'" @click="backToBrowse">返回发现</button>
-          <button class="btn" v-else @click="resetFilters">重置筛选</button>
+          <template v-if="pageNote">
+            <button class="btn primary" @click="goPage(1)">回到第 1 页</button>
+            <button class="btn" @click="resetFilters">重置筛选</button>
+          </template>
+          <template v-else>
+            <button class="btn" v-if="blockedOnPage" @click="clearBlockedCreators">清空屏蔽名单</button>
+            <button class="btn" v-if="mode === 'author'" @click="backToBrowse">返回发现</button>
+            <button class="btn" v-else @click="resetFilters">重置筛选</button>
+          </template>
         </div>
       </div>
 
@@ -241,6 +256,16 @@
           <span class="chip muted" v-if="filters.exclude.length">
             排除 {{ filters.exclude.length }} 项
           </span>
+        </div>
+
+        <!--
+          说明性提示（不是错误）：搜索口径、深翻页上限。
+          这两个 computed（searchNote / pageCapNote）在 app.js 里早就写好了，
+          但模板里一直没渲染 —— 属于"写了没人看"的死代码，用户永远看不到解释。
+        -->
+        <div class="notice" v-if="searchNote || pageCapNote">
+          <svg class="ic"><use href="#i-info"></use></svg>
+          <span class="notice-text wrap">{{ searchNote || pageCapNote }}</span>
         </div>
 
         <div class="grid" :class="{ dim: loading }" ref="gridScroll">
@@ -323,7 +348,7 @@
       -->
       <div v-if="subs.note" class="notice warn">
         <svg class="ic"><use href="#i-alert"></use></svg>
-        <span class="notice-text">{{ subs.note }}</span>
+        <span class="notice-text wrap">{{ subs.note }}</span>
       </div>
 
       <div v-if="subs.loading && !subs.items.length" class="grid">

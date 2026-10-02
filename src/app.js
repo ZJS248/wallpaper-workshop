@@ -516,6 +516,16 @@ new Vue({
     searchNote() {
       return (this.lastResult && this.lastResult.searchNote) || '';
     },
+    /**
+     * 翻过可浏览深度时的说明（后端算好给的，见 steamApi 的 deepPageNote）。
+     *
+     * 无多选类目 / 多选+位置键这两条路径要先凑一份"冻结前缀"再切页，
+     * 前缀有上限，超过之后切出来就是空的 —— 以前只显示"没有符合条件的作品"，
+     * 会让人以为是筛选的问题。这里把真实原因显示出来。
+     */
+    pageNote() {
+      return (this.lastResult && this.lastResult.pageNote) || '';
+    },
 
     /**
      * 加载超过 6 秒时给的提示：上游（Steam / 本地代理）偶尔会限流，

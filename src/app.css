@@ -211,6 +211,9 @@ input::placeholder, textarea::placeholder { color: #5d6b7a; }
 }
 .notice .ic { color: var(--accent-2); }
 .notice-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 长说明文字要允许换行。默认的 .notice-text 是单行 + 省略号，那是给短消息用的，
+   套在"为什么翻不出内容"这类整句话的说明上会被截掉一半。 */
+.notice-text.wrap { white-space: normal; overflow: visible; text-overflow: clip; line-height: 1.6; }
 .notice.warn { border-left-color: var(--warn); }
 .notice.warn .ic { color: var(--warn); }
 .notice.error { border-left-color: var(--danger); background: rgba(248, 81, 73, .07); }
@@ -599,6 +602,20 @@ input::placeholder, textarea::placeholder { color: #5d6b7a; }
   background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg);
   overflow: hidden; cursor: pointer;
   transition: border-color var(--t-fast), box-shadow var(--t-fast), transform var(--t-fast);
+  /*
+   * 跳过屏外卡片的布局与绘制。
+   *
+   * 为什么需要：一页 30~100 张卡片，而 WE 的预览图很多是 1~2MB 的**动图 GIF**
+   * （Steam CDN 不对这类图做缩放，见 /img 的实现）。屏外那些虽然 lazy 不下载，
+   * 但一旦进过视口就会一直解码动画，低配机器上这是滚动卡顿的主因。
+   * content-visibility:auto 让屏外卡片根本不参与布局与绘制。
+   *
+   * contain-intrinsic-size 是必需的：不给的话屏外元素高度算 0，
+   * 滚动条长度会随滚动不停跳。带 auto 前缀会记住上次渲染的真实尺寸，越滚越准。
+   * 232px ≈ 卡片宽度 276px 时 16:9 缩略图 + 标题/信息行的高度。
+   */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 232px;
 }
 .card:hover { border-color: var(--line-2); box-shadow: var(--sh-2); }
 .card.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
