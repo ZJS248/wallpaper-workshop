@@ -63,7 +63,23 @@ const STARTED_AT = Date.now();
 const IMAGE_CACHE = new Map();
 const IMAGE_CACHE_MAX_BYTES = 128 * 1024 * 1024;
 const IMAGE_CACHE_MAX_ITEMS = 400;
-const IMAGE_CONCURRENCY = 4;   // 同时最多几个图片请求（给 API 留出上游带宽；图片晚点无所谓）
+/*
+ * 同时最多几个图片请求。
+ *
+ * 原值 4，实测偏保守 —— WE 的预览图多是 1~2MB 的动图 GIF（Steam CDN 不支持缩放，
+ * 加 imw/imh 参数字节数完全不变，实测 239910B），一页 30 张就是 15~19MB。
+ * 而瓶颈是**每个请求的延迟**（实测最慢的一张 8.6 秒只有 212KB），
+ * 不是带宽 —— 所以多开几路能明显把总时间压下来。
+ *
+ * 实测（同一台机器、经本地代理）：
+ *   并发 4 ：第 2 页图片全部加载完 10421ms，图片在途时 /api/browse 2.07s
+ *   并发 10：第 2 页图片全部加载完  7903ms，图片在途时 /api/browse 2.03s  ← 取这个
+ *   并发 16：第 2 页图片全部加载完  7972ms，图片在途时 /api/browse 4.02s
+ * 并发 10 相对 4 把图片快了约 24% 且**接口没有变慢**；
+ * 再往上（16）图片已经不再变快，接口却翻倍 —— 正是下面 imageGate 注释里
+ * "预览图占住名额把 /api/browse 拖慢"那个老问题。所以停在 10。
+ */
+const IMAGE_CONCURRENCY = 10;
 let imageCacheBytes = 0;
 let imageActive = 0;
 let apiActive = 0;             // 正在处理的 /api 请求数（图片闸门据此给 API 让路）

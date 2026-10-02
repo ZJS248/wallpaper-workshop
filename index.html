@@ -258,16 +258,6 @@
           </span>
         </div>
 
-        <!--
-          说明性提示（不是错误）：搜索口径、深翻页上限。
-          这两个 computed（searchNote / pageCapNote）在 app.js 里早就写好了，
-          但模板里一直没渲染 —— 属于"写了没人看"的死代码，用户永远看不到解释。
-        -->
-        <div class="notice" v-if="searchNote || pageCapNote">
-          <svg class="ic"><use href="#i-info"></use></svg>
-          <span class="notice-text wrap">{{ searchNote || pageCapNote }}</span>
-        </div>
-
         <div class="grid" :class="{ dim: loading }" ref="gridScroll">
           <wp-card v-for="it in visibleItems" :key="it.id" :item="it"
                    :active="!!(selected && selected.id === it.id)"
