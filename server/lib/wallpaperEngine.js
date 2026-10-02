@@ -22,21 +22,34 @@ const httpClient = require('./httpClient');
 
 /* ------------------------------ 路径探测 ------------------------------ */
 
-const WE_DIR_CANDIDATES = [
-  'E:/SteamLibrary/steamapps/common/wallpaper_engine',
-  'C:/Program Files (x86)/Steam/steamapps/common/wallpaper_engine',
-  'C:/SteamLibrary/steamapps/common/wallpaper_engine',
-  'D:/SteamLibrary/steamapps/common/wallpaper_engine',
-  'F:/SteamLibrary/steamapps/common/wallpaper_engine',
+/**
+ * 按"盘符 × 常见布局"生成 Steam 目录候选。
+ *
+ * ⚠️ 这里踩过坑：原来只硬列了 `*:/SteamLibrary/...` 和
+ * `C:/Program Files (x86)/Steam/...` 两种布局，**漏了 `*:/Steam/...`** ——
+ * 也就是"Steam 直接装在盘符根目录下"这种很常见的装法。
+ * 实测本机就是 `D:/Steam`，于是 detectWsDir / detectWeDir 永远返回空，
+ * 已订阅页拿不到本地库。现在按盘符生成，覆盖面够了。
+ */
+const STEAM_DRIVES = ['C', 'D', 'E', 'F', 'G'];
+const STEAM_LAYOUTS = [
+  (d) => d + ':/Steam/steamapps/',
+  (d) => d + ':/SteamLibrary/steamapps/',
+  (d) => d + ':/Program Files (x86)/Steam/steamapps/',
+  (d) => d + ':/Games/Steam/steamapps/',
 ];
 
-const WS_DIR_CANDIDATES = [
-  'E:/SteamLibrary/steamapps/workshop/content/431960',
-  'C:/Program Files (x86)/Steam/steamapps/workshop/content/431960',
-  'C:/SteamLibrary/steamapps/workshop/content/431960',
-  'D:/SteamLibrary/steamapps/workshop/content/431960',
-  'F:/SteamLibrary/steamapps/workshop/content/431960',
-];
+function steamAppCandidates(rel) {
+  const out = [];
+  for (const layout of STEAM_LAYOUTS) {
+    for (const d of STEAM_DRIVES) out.push(layout(d) + rel);
+  }
+  return out;
+}
+
+const WE_DIR_CANDIDATES = steamAppCandidates('common/wallpaper_engine');
+
+const WS_DIR_CANDIDATES = steamAppCandidates('workshop/content/431960');
 
 function looksLikeWeDir(dir) {
   try {

@@ -616,9 +616,21 @@ async function loadSubscribedMeta(wsDir, ids) {
 
 async function apiSubscribed(url) {
   const cfg = settings.getConfig();
-  if (!cfg.wsDir) {
-    return { ok: false, error: '没找到创意工坊内容目录（steamapps/workshop/content/431960）', items: [], totalCount: 0 };
-  }
+  /*
+   * ⚠️ wsDir（创意工坊内容目录）**不是必需品**，这里不能直接失败。
+   *
+   * 踩过的坑：旧实现在开头就 `if (!cfg.wsDir) return { ok:false, error:'没找到…' }`，
+   * 于是**没装 Wallpaper Engine（或从没下载过工坊内容）的用户整页打不开** ——
+   * 哪怕他的 Steam 订阅清单本身完全拿得到。
+   * 用户实测报过："创意工坊正常，已订阅一直 0 个、一直转圈"。
+   *
+   * 实际上 wsDir 只提供两样东西：订阅时间、是否已下载。
+   * 列表本身来自 Steam（见下面的 steamIds），元数据也来自 Steam
+   * （loadSubscribedMeta 里 wsDir 只当缓存键用）。
+   * 所以这里改成**降级**：没有 wsDir 也照常出列表，
+   * 只把 installed 置 false、订阅时间留空，并用 note 说明原因。
+   */
+  const wsDir = cfg.wsDir || '';
   // 用户点「刷新」= 强制重新读盘 + 重新拉 Steam 订阅列表（不走任何缓存）
   if (url.searchParams.get('fresh') === '1') {
     wallpaperEngine.clearLocalCaches();
@@ -632,7 +644,7 @@ async function apiSubscribed(url) {
    * 只看文件夹的话，取消订阅了十几分钟还显示"已订阅"（用户实测报的）。
    * 取不到 Steam 列表（没登录 / Cookie 过期）才退回本地库，保证离线也能用。
    */
-  const local = wallpaperEngine.listSubscribed(cfg.wsDir);
+  const local = wsDir ? wallpaperEngine.listSubscribed(wsDir) : [];
   const localMap = new Map(local.map((x) => [String(x.id), x]));
   let steamIds = null;
   try {
@@ -652,7 +664,7 @@ async function apiSubscribed(url) {
   const ids = steamIds || local.map((x) => String(x.id));
   const staleLocal = steamIds ? local.filter((x) => steamIds.indexOf(String(x.id)) < 0).length : 0;
 
-  const map = await loadSubscribedMeta(cfg.wsDir, ids);
+  const map = await loadSubscribedMeta(wsDir, ids);
   let items = ids.map((id) => {
     const loc = localMap.get(id);
     const meta = map.get(String(id)) || {};
@@ -690,10 +702,17 @@ async function apiSubscribed(url) {
     totalPages: totalPages,
     page: page,
     pageSize: pageSize,
-    wsDir: cfg.wsDir,
+    wsDir: wsDir,
     // 从 Steam 列表为准；如果本地还留着一批已取消订阅的文件夹，把数量告诉前端
     source: steamIds ? 'steam' : 'local',
     staleLocalCount: staleLocal,
+    // 没有本地目录时**如实说明，但不报错**：列表照常可用，只是少了两个字段
+    note: wsDir
+      ? ''
+      : '没找到本地创意工坊内容目录（未安装 Wallpaper Engine，或从未下载过工坊内容）。' +
+        (steamIds
+          ? '列表来自 Steam 订阅，但"订阅时间"与"已下载"状态不可用。'
+          : '而且 Steam 订阅列表也没取到（登录态可能已过期），所以这里是空的。'),
   };
 }
 

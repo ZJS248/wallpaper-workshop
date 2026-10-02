@@ -316,6 +316,16 @@
         <button class="btn sm" @click="loadSubscribed">重试</button>
       </div>
 
+      <!--
+        后端的补充说明（不是错误）：典型场景是"没找到本地创意工坊内容目录"——
+        没装 Wallpaper Engine 的用户列表照样能用，只是少了"订阅时间 / 已下载"两个字段。
+        以前后端在这种情况下直接整页失败，用户看到的是"一直 0 个 + 一直转圈"。
+      -->
+      <div v-if="subs.note" class="notice warn">
+        <svg class="ic"><use href="#i-alert"></use></svg>
+        <span class="notice-text">{{ subs.note }}</span>
+      </div>
+
       <div v-if="subs.loading && !subs.items.length" class="grid">
         <div v-for="n in 8" :key="n" class="skeleton"></div>
       </div>

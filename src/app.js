@@ -228,6 +228,8 @@ new Vue({
         search: '', sort: 'time_desc', loading: false, error: '', wsDir: '',
         /** 'steam' = 以 Steam 订阅列表为准；'local' = 退回本地库 */
         source: '', staleLocalCount: 0,
+        /** 后端的补充说明（如"没找到本地创意工坊目录"）——不是错误，列表照常可用 */
+        note: '',
       },
       subsSearchInput: '',
       /** 本地屏蔽的作者 steamId 列表 */
@@ -2144,6 +2146,7 @@ new Vue({
         this.subs.wsDir = r.wsDir || '';
         this.subs.source = r.source || '';
         this.subs.staleLocalCount = r.staleLocalCount || 0;
+        this.subs.note = r.note || '';
         // 列表以 Steam 为准时，顺手把"已订阅"角标也同步过来（取消订阅能立刻反映）
         if (r.source === 'steam') this.loadSubscribedIds();
       } catch (e) {
