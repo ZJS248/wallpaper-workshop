@@ -32,6 +32,7 @@
 const crypto = require('crypto');
 const httpClient = require('./lib/httpClient');
 const dnsResolve = require('./lib/dnsResolve');
+const frontLog = require('./lib/frontLog');
 const pageStore = require('./lib/pageStore');
 const settings = require('./lib/settings');
 const session = require('./lib/session');
@@ -1053,6 +1054,20 @@ async function handle(ctx) {
     case '/api/item/vote':
       needMethod(['POST']);
       result = await apiVote(await readJson());
+      break;
+    /*
+     * 前端日志。
+     *   POST { lines: string[] }  → 追加到 <配置目录>/frontend.log
+     *   GET  ?tail=N              → 读回最后 N 行（方便排查，不用去翻文件）
+     * 见 server/lib/frontLog.js 顶部的说明。
+     */
+    case '/api/log':
+      if (method === 'GET') {
+        result = frontLog.readTail(clampInt(url.searchParams.get('tail'), 1, 2000, 200));
+      } else {
+        needMethod(['POST']);
+        result = frontLog.append((await readJson()).lines);
+      }
       break;
 
     case '/api/session':

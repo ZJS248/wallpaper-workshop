@@ -20,6 +20,7 @@ const { URL } = require('url');
 const settings = require('./lib/settings');
 const routes = require('./routes');
 const session = require('./lib/session');
+const frontLog = require('./lib/frontLog');
 const { HttpError } = require('./lib/util');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -234,6 +235,21 @@ const imgServer = http.createServer(async (req, res) => {
     imgPort = 0;
     console.warn('  图片代理独立端口 ' + (port + 1) + ' 启动失败（' + (e.code || e.message) + '），退回同源 /img');
   });
+  /*
+   * 启动时清一次前端日志（按保留期 7 天 + 总量 20MB）。
+   * 放在这里而不是只靠写入时清理：用户可能开了几天才想起来看日志，
+   * 期间前端一条都没上报的话，写入路径上的节流清理永远不触发。
+   */
+  try {
+    const swept = frontLog.sweep(true);
+    if (swept && swept.removed && swept.removed.length) {
+      console.log('  日志清理    : 删除 ' + swept.removed.length + ' 个过期文件（保留 ' +
+        frontLog.RETENTION_DAYS + ' 天）');
+    }
+  } catch (e) {
+    /* 清理失败不能影响启动 */
+  }
+
   imgServer.listen(imgPort, host);
 
   server.listen(port, host, () => {
@@ -247,6 +263,8 @@ const imgServer = http.createServer(async (req, res) => {
     console.log('  登录态      : ' + (cfg.cookie ? cfg.cookie.length + ' 字节，来源 ' + cfg.cookieSource : '未登录（浏览不受影响）'));
     console.log('  父项目      : ' + (cfg.parent && cfg.parent.found ? cfg.parent.dir : '未探测到'));
     console.log('  父项目后端  : ' + (cfg.parentApiBase || '未探测到（默认 http://127.0.0.1:8897）'));
+    console.log('  前端日志    : ' + frontLog.LOG_DIR + '（按天分文件，保留 ' + frontLog.RETENTION_DAYS + ' 天）');
+    console.log('                前端上报的行会实时打在下面（带 [前端] 前缀），也可以 GET /api/log?tail=200 读回');
     console.log('  自检        : node scripts/selftest.js');
     console.log('');
     session.logEvent(

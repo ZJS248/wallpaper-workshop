@@ -1141,6 +1141,41 @@ new Vue({
       this.items = rest;
       this.droppedDupes = drop;
     },
+    /**
+     * 记录"这一页预览图全部加载完"花了多久。
+     *
+     * 为什么值得单独记：实测接口只要 ~0.5 秒，而 30 张预览图（一页 15MB 左右、
+     * 多是 1~2MB 的动图 GIF）要 8~10 秒 —— 用户感受到的"翻页慢"几乎全是图片。
+     * 没有这行日志，就会一直误以为是接口慢，查错方向。
+     */
+    trackImages(page) {
+      const t0 = Date.now();
+      this.$nextTick(() => {
+        const imgs = Array.prototype.slice.call(document.querySelectorAll('.card-thumb img'));
+        if (!imgs.length) return;
+        const total = imgs.length;
+        let finished = false;
+        const report = (timedOut) => {
+          if (finished) return;
+          finished = true;
+          const loaded = imgs.filter((i) => i.complete && i.naturalWidth > 0).length;
+          if (window.WLog) WLog.img(page, total, loaded, Date.now() - t0, !!timedOut);
+        };
+        let left = imgs.filter((i) => !i.complete).length;
+        if (!left) return report(false);
+        imgs.forEach((i) => {
+          if (i.complete) return;
+          const onEnd = () => {
+            if (--left <= 0) report(false);
+          };
+          i.addEventListener('load', onEnd, { once: true });
+          i.addEventListener('error', onEnd, { once: true });
+        });
+        // 兜底：20 秒还没完也如实记一笔，别让它永远不输出
+        setTimeout(() => report(true), 20000);
+      });
+    },
+
     async loadList(opts) {
       const force = opts && opts.force;
       if (this.mode === 'author' && this.authorView) return this.loadAuthor(force);
@@ -1164,6 +1199,7 @@ new Vue({
         this.lastResult = data;
         this.applyPageDedup(data.page || this.filters.page, data.items || []);
         this.loadFileSizes(this.items);
+        this.trackImages(this.page || this.filters.page);
         // 订阅角标（要翻完用户所有订阅，5~10 秒）放到列表出来之后再拉，
         // 免得它跟列表抢上游带宽 —— 这就是"订阅接口 9 秒、列表一直转圈"的成因。
         if (!this._subsLoaded) {
@@ -1476,6 +1512,7 @@ new Vue({
 
     goPage(p) {
       if (p === '…' || p === this.page) return;
+      if (window.WLog) WLog.act('翻页', { from: this.page, to: p, sort: this.filters.sort });
       this.filters.page = p;
       this.loadList();
       this.scrollToTop();
@@ -1735,6 +1772,7 @@ new Vue({
     async selectItem(item) {
       if (!item || !item.id) return;
       if (this.selected && this.selected.id === item.id) return;
+      if (window.WLog) WLog.act('打开详情', { id: item.id, title: item.title });
       this.selected = item;
       this.detail = null;
       this.detailError = '';
@@ -1865,6 +1903,7 @@ new Vue({
     async doSubscribe(item, opts) {
       const id = item && item.id;
       if (!id) return;
+      if (window.WLog) WLog.act('订阅', { id: id, title: item.title });
       if (!this.loggedIn) {
         this.openSettings('account');
         this.showToast('需要登录 Steam 才能订阅', 'warn');
@@ -2226,6 +2265,7 @@ new Vue({
 
     subsGoPage(p) {
       if (p === '…' || p === this.subs.page) return;
+      if (window.WLog) WLog.act('已订阅翻页', { from: this.subs.page, to: p });
       this.subs.page = p;
       this.loadSubscribed();
       this.scrollToTop();

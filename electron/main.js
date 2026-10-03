@@ -123,19 +123,56 @@ if (process.env.WW_KEEP_GAMEPP_LAYER !== '1') {
  * "应用程序错误"（它会给出故障模块名和路径，是定位这类问题最快的入口）。
  */
 const LOG_FILE = path.join(app.getPath('userData'), 'desktop.log');
-const LOG_MAX = 256 * 1024;
+// 上限 1MB。超了**轮转**成 desktop.log.1（只留一代），而不是直接清空 ——
+// 以前是清空，一旦后端日志把文件写满，最宝贵的"启动阶段"事件就被抹掉了。
+const LOG_MAX = 1024 * 1024;
 
 function logToFile(tag, detail) {
   try {
     const text = detail instanceof Error ? detail.stack || detail.message : String(detail);
     try {
-      if (fs.statSync(LOG_FILE).size > LOG_MAX) fs.writeFileSync(LOG_FILE, '', 'utf8');
+      if (fs.statSync(LOG_FILE).size > LOG_MAX) fs.renameSync(LOG_FILE, LOG_FILE + '.1');
     } catch (e) { /* 文件还不存在，正常 */ }
     fs.appendFileSync(LOG_FILE, '[' + new Date().toISOString() + '] ' + tag + '  ' + text + '\n', 'utf8');
   } catch (e) {
     /* 日志本身出问题绝不能影响主流程 */
   }
 }
+
+/*
+ * 兜住主进程的 console，同时落一份进 desktop.log。
+ *
+ * 为什么需要：后端（server/）是**跑在本进程里**的（见文件开头），所以它的
+ * console.log 在打包成 GUI 程序之后**没有任何地方显示** —— 用户在 cmd 里
+ * 也看不到。前端上报的日志虽然写进了 config/frontend-*.log，
+ * 但那个路径不好找；而 desktop.log 是已知位置、出错时第一时间会去看的。
+ * 这里把 console 兜住，两边就都能看到。
+ *
+ * ⚠️ 只落盘，不改 stdout：`node server.js` 直接跑时行为不变。
+ */
+(function teeConsoleToFile() {
+  const orig = { log: console.log, warn: console.warn, error: console.error };
+  ['log', 'warn', 'error'].forEach((k) => {
+    console[k] = function () {
+      try {
+        const text = Array.prototype.map
+          .call(arguments, (a) => {
+            if (typeof a === 'string') return a;
+            try {
+              return JSON.stringify(a);
+            } catch (e) {
+              return String(a);
+            }
+          })
+          .join(' ');
+        if (text.trim()) logToFile(k === 'log' ? 'console' : k, text.slice(0, 1000));
+      } catch (e) {
+        /* 日志不能反过来搞挂主流程 */
+      }
+      return orig[k].apply(console, arguments);
+    };
+  });
+})();
 
 process.on('uncaughtException', (e) => logToFile('uncaughtException', e));
 process.on('unhandledRejection', (e) => logToFile('unhandledRejection', e));

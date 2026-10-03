@@ -595,7 +595,16 @@ input::placeholder, textarea::placeholder { color: #5d6b7a; }
   gap: 14px;
   transition: opacity var(--t-fast);
 }
-.grid.dim { opacity: .5; pointer-events: none; }
+/*
+ * 加载中把网格压暗，但**不再禁止点击**。
+ *
+ * 原来这里是 `pointer-events: none`，于是加载期间整片网格、卡片上的订阅/详情按钮
+ * 全都点不动 —— 用户报的"翻到第 5 页突然卡住了，没法订阅、没法看详情、也没法继续
+ * 翻页"就是它：其实只是那一页加载得慢，界面看起来却像死了。
+ * 慢的时候用户本来就想点别的东西，堵住点击只会把"慢"变成"坏"。
+ * 压暗本身已经足够表达"正在刷新"，不必再抢走交互。
+ */
+.grid.dim { opacity: .62; }
 
 .card {
   position: relative;

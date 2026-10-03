@@ -11,7 +11,37 @@
 
   const BASE = '';
 
+  /*
+   * 所有接口都从这里过一道，顺便记耗时。
+   *
+   * 目的：用户报"翻到第 5 页卡住了"时，能一眼看出是**哪一发请求慢/失败**，
+   * 还是接口早就回来了、卡在别处。没有这层就只能靠猜。
+   *
+   * 高频轮询（/api/we/state 之类）不记，否则日志会被刷满、真正有用的行被淹掉。
+   */
+  const LOG_SKIP = ['/api/we/state', '/api/log', '/api/favicon'];
+  function loggable(path) {
+    for (const p of LOG_SKIP) if (path.indexOf(p) === 0) return false;
+    return true;
+  }
+
   async function request(path, options) {
+    const t0 = Date.now();
+    try {
+      const out = await requestInner(path, options);
+      if (window.WLog && loggable(path)) WLog.api(path, Date.now() - t0, true);
+      return out;
+    } catch (e) {
+      // 主动取消不算失败（翻页/切筛选本来就会取消上一发），记了只会误导
+      const aborted = e && e.name === 'AbortError';
+      if (window.WLog && loggable(path) && !aborted) {
+        WLog.api(path, Date.now() - t0, false, (e && e.message) || String(e));
+      }
+      throw e;
+    }
+  }
+
+  async function requestInner(path, options) {
     const opts = options || {};
     const res = await fetch(BASE + path, {
       method: opts.method || 'GET',
