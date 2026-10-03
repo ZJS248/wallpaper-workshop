@@ -281,7 +281,9 @@ Vue.component('detail-pane', {
           </div>
 
           <div class="detail-actions">
-            <button class="btn lg primary" :class="{ on: subscribed }" :disabled="busy" @click="subscribe">              {{ subscribed ? '已订阅（点击取消）' : '订阅' }}
+            <button class="btn lg primary" :class="{ on: subscribed, busy: busy }" :disabled="busy" @click="subscribe">
+              <svg v-if="busy" class="ic spin"><use href="#i-refresh"></use></svg>
+              {{ busy ? '处理中…' : (subscribed ? '已订阅（点击取消）' : '订阅') }}
             </button>
             <button class="btn icon lg" :class="{ on: favorited }" :disabled="busy"
                     :title="favorited ? '取消收藏' : '收藏'"

@@ -85,11 +85,22 @@
         push('[act] ' + name + (detail === undefined ? '' : ' ' + short(detail)));
       } catch (e) {}
     },
-    /** 接口耗时。ok=false 时带上原因 */
-    api: function (url, ms, okFlag, note) {
+    /**
+     * 接口耗时。
+     *
+     * serverMs 是服务端自己报的耗时（响应头 X-Api-Ms）。两个数一起看才能定性：
+     *   总耗时 ≈ 服务端耗时  → 慢在服务端（也就是上游 Steam）
+     *   总耗时 ≫ 服务端耗时  → 慢在传输 / 排队 / 前端
+     * 只记一个总数的话，"是网络还是后端"就只能猜。
+     */
+    api: function (url, ms, okFlag, note, serverMs) {
       try {
-        push('[api] ' + (okFlag ? 'ok  ' : 'FAIL') + ' ' + Math.round(ms) + 'ms  ' + url +
-          (note ? '  ' + String(note).slice(0, 200) : ''));
+        var s = Number(serverMs);
+        var extra = isFinite(s) && s > 0
+          ? '  服务端 ' + Math.round(s) + 'ms，传输+等待 ' + Math.round(ms - s) + 'ms'
+          : '';
+        push('[api] ' + (okFlag ? 'ok  ' : 'FAIL') + ' ' + Math.round(ms) + 'ms' + extra + '  ' + trimUrl(url) +
+          (note ? '  ' + String(note).slice(0, 160) : ''));
       } catch (e) {}
     },
     /** 一页预览图全部加载完（或超时）的耗时 */
@@ -121,6 +132,28 @@
     } catch (e) {
       return String(v);
     }
+  }
+
+  /**
+   * 把 URL 压短。
+   * /api/details?ids=3808…%2C3808…（几十个 id）这种一行能到上千字符，
+   * 日志里既占地方又不好看 —— 保留路径 + 关键参数，其余截断。
+   */
+  function trimUrl(u) {
+    var s = String(u || '');
+    if (s.length <= 80) return s;
+    var q = s.indexOf('?');
+    if (q < 0) return s.slice(0, 80) + '…';
+    var path = s.slice(0, q);
+    var query = s.slice(q + 1);
+    // 保留 page / sort / 查询词这类短参数，丢掉超长的 ids
+    var keep = [];
+    query.split('&').forEach(function (kv) {
+      if (kv.length <= 40 && !/^ids=/.test(kv)) keep.push(kv);
+    });
+    var out = path + (keep.length ? '?' + keep.join('&') : '');
+    if (/ids=/.test(query)) out += '  [含 ids 列表]';
+    return out.length > 120 ? out.slice(0, 120) + '…' : out;
   }
 
   /* ---------------- 全局错误捕获 ---------------- */
@@ -156,6 +189,28 @@
       }
     }, INTERVAL);
   })();
+
+  /*
+   * 页面可见性。
+   * 切到后台再回来时浏览器会**节流定时器**，有些"卡住"其实是这个造成的假象；
+   * 记一笔就能排除掉，省得往代码里找。
+   */
+  document.addEventListener('visibilitychange', function () {
+    WLog.info('[vis] 页面' + (document.hidden ? '切到后台' : '回到前台'));
+  });
+
+  /* 首次加载耗时：导航各阶段各用了多久 */
+  root.addEventListener('load', function () {
+    try {
+      var nav = performance.getEntriesByType('navigation')[0];
+      if (!nav) return;
+      WLog.info('[boot] 首屏时间线：接口响应 ' + Math.round(nav.responseEnd) + 'ms，' +
+        'DOM 就绪 ' + Math.round(nav.domContentLoadedEventEnd) + 'ms，' +
+        'load 事件 ' + Math.round(nav.loadEventEnd) + 'ms');
+    } catch (e) {
+      /* 忽略 */
+    }
+  });
 
   // 页面要关了，把剩下的日志尽量送出去
   root.addEventListener('pagehide', function () {

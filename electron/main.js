@@ -514,6 +514,46 @@ function createWindow() {
     logToFile('did-finish-load', '页面加载完成 ' + BASE + '/');
   });
 
+  /*
+   * 窗口状态变化。
+   *
+   * 为什么值得记：用户报"卡住"时，先要排除"其实是窗口被最小化/失焦了"这类
+   * 环境因素；另外最大化/还原会触发一次大范围重排，如果卡顿总是紧跟在这之后，
+   * 方向就完全不同。这几行几乎零成本，但能省掉一轮来回问。
+   */
+  win.on('maximize', () => logToFile('window', '最大化'));
+  win.on('unmaximize', () => logToFile('window', '还原'));
+  win.on('minimize', () => logToFile('window', '最小化'));
+  win.on('restore', () => logToFile('window', '从最小化恢复'));
+  win.on('show', () => logToFile('window', '显示'));
+  win.on('hide', () => logToFile('window', '隐藏到托盘'));
+  win.on('focus', () => logToFile('window', '获得焦点'));
+
+  /*
+   * ⚠️ 这两条是排查"界面卡住"最值钱的信号：
+   * Electron 自己会监测渲染进程有没有卡死 —— `unresponsive` 就是"主线程
+   * 长时间没响应"，`responsive` 是恢复。有了它就不必再猜"到底卡没卡"，
+   * 而且能拿到**卡了多久**（从 unresponsive 到 responsive 的间隔）。
+   */
+  let unresponsiveAt = 0;
+  win.webContents.on('unresponsive', () => {
+    unresponsiveAt = Date.now();
+    logToFile('unresponsive', '渲染进程无响应（主线程卡住），开始等待恢复');
+  });
+  win.webContents.on('responsive', () => {
+    const ms = unresponsiveAt ? Date.now() - unresponsiveAt : 0;
+    unresponsiveAt = 0;
+    logToFile('responsive', '渲染进程已恢复' + (ms ? '，卡了约 ' + Math.round(ms / 1000) + ' 秒' : ''));
+  });
+
+  // 渲染进程直接没了（崩溃 / 被 OOM 杀掉）—— 和"卡住"是两回事，要能区分
+  win.webContents.on('render-process-gone', (e, details) => {
+    logToFile('render-process-gone', JSON.stringify(details));
+  });
+  win.webContents.on('did-fail-load', (e, code, desc, url) => {
+    logToFile('did-fail-load', code + ' ' + desc + ' ' + url);
+  });
+
   // 点关闭 = 收进托盘（托盘菜单里才能真正退出）
   win.on('close', (e) => {
     if (!quitting) {

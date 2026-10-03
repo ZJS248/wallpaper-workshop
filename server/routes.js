@@ -990,6 +990,7 @@ async function handle(ctx) {
   };
 
   let result;
+  const apiT0 = Date.now();
   // /api 请求期间把"图片让路"的开关打开（见 imageGate 的说明）
   apiActive++;
   try {
@@ -1096,6 +1097,25 @@ async function handle(ctx) {
   } finally {
     apiActive--;
   }
+
+  /*
+   * 记服务端耗时，并通过响应头回给前端。
+   *
+   * 为什么要有这个头：前端只知道自己等了多久（**含网络往返**），
+   * 分不清是"服务端处理慢"还是"传输慢"。两边一对就清楚了：
+   *   前端 67s / 服务端 66.5s → 服务端（也就是上游 Steam）慢
+   *   前端 67s / 服务端  0.5s → 传输或前端渲染慢
+   * 前端会把这两个数一起写进日志（见 src/api.js）。
+   */
+  const apiMs = Date.now() - apiT0;
+  try {
+    res.setHeader('X-Api-Ms', String(apiMs));
+    res.setHeader('Access-Control-Expose-Headers', 'X-Api-Ms');
+  } catch (e) {
+    /* 头设置失败不能影响响应 */
+  }
+  // 慢接口的日志由 server.js 统一打（那边本来就有每请求一行的 [api] 记录，
+  // 这里再打一条会重复）。本函数只负责把耗时通过响应头告诉前端。
 
   /*
    * 业务失败：HTTP 200 + ok:false（未登录则 401），让前端统一处理。

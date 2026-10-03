@@ -314,12 +314,19 @@ async function getText(url, opts) {
   opts = opts || {};
   const headers = Object.assign({}, opts.headers || {});
   if (opts.cookie) headers.Cookie = opts.cookie;
-  const res = await (opts.noLimit ? rawRequest : requestLimited)(url, {
+  /*
+   * ⚠️ 这里**统一走 requestLimited**，不要写成 `opts.noLimit ? rawRequest : requestLimited`。
+   * 那样写会绕过 requestLimited 里的计时与上游记录 —— 而浏览/详情这些主力接口
+   * 全都带 noLimit，于是"上游为什么慢"一条都记不到（踩过）。
+   * noLimit 的语义由 requestLimited 内部处理：跳过限流闸门，但照常记账。
+   */
+  const res = await requestLimited(url, {
     method: 'GET',
     headers,
     proxy: opts.proxy,
     timeout: opts.timeout,
     maxRedirects: opts.maxRedirects,
+    noLimit: opts.noLimit,
   });
   return res;
 }
@@ -405,7 +412,7 @@ function sleep(ms) {
  * 800ms 仍然会被 Steam 判定为异常流量并回 429/精简页，表现是"点了没反应，
  * 过一会儿才刷新"。宁可慢一点，也不要出现"看起来卡住"。
  */
-function withHostLimit(host, fn) {
+function withHostLimit(host, fn, trace) {
   const st = HOST_STATE.get(host) || { chain: Promise.resolve(), slot: 0 };
   const startAt = Math.max(Date.now(), st.slot);
   st.slot = startAt + MIN_GAP_MS; // 立刻占位，后面的请求自动排队
@@ -413,7 +420,11 @@ function withHostLimit(host, fn) {
 
   const run = st.chain.then(async () => {
     const wait = startAt - Date.now();
-    if (wait > 0) await sleep(wait);
+    if (wait > 0) {
+      // 记进 trace：这段是"被限流闸门排队"，不是网络慢 —— 两者要分开算
+      if (trace) trace.queue += wait;
+      await sleep(wait);
+    }
     return fn();
   });
   // 链上任何一环失败都不能把后续请求带崩
@@ -422,6 +433,107 @@ function withHostLimit(host, fn) {
     () => undefined
   );
   return run;
+}
+
+/**
+ * 上游请求耗时明细。
+ *
+ * 为什么要把三段分开：用户看到"接口 67 秒"，第一反应是"网慢"，
+ * 但实际可能是**限流排队**（同 host 每 1.2 秒才放一个）或**重试退避**
+ * （429/403 之后等 0.9→1.8→3.6 秒）。三者都表现为"慢"，
+ * 处理方向却完全不同：排队要调限流参数，退避要查是不是被 Steam 限了，
+ * 真网络慢才去查代理/DNS。日志里不拆开，就只能靠猜。
+ *
+ * 只记**慢的（>1.5 秒）和失败的**，快的成功请求不记 —— 否则一页几十张图
+ * 会把真正有用的行淹掉。
+ */
+const UPSTREAM_SLOW_MS = 1500;
+
+/*
+ * 最近的上游请求记录（环形缓冲）。
+ *
+ * 为什么需要：单次上游请求可能都不慢，但一个接口里**打了很多次** ——
+ * 比如 /api/details 要分批取详情，总耗时 6.8 秒，而每次上游只要 800ms。
+ * 只看"慢请求"日志会一片空白，看不出为什么慢。routes.js 会在接口慢时
+ * 用 recentSince() 把这段时间内的上游请求汇总成一行。
+ */
+const RECENT_MAX = 80;
+const RECENT = [];
+function recordUpstream(e) {
+  RECENT.push(e);
+  while (RECENT.length > RECENT_MAX) RECENT.shift();
+}
+/** 取 t0 之后发生的上游请求（给 routes.js 做接口级汇总用） */
+function recentSince(t0) {
+  const out = [];
+  for (let i = RECENT.length - 1; i >= 0; i--) {
+    if (RECENT[i].at < t0) break;
+    out.push(RECENT[i]);
+  }
+  return out;
+}
+
+function logUpstream(t, url, total, res) {
+  const status = (res && res.status) || 0;
+  const failed = !res || status >= 400;
+  let short = url;
+  try {
+    const u = new URL(url);
+    short = u.host + u.pathname + (u.search ? u.search.slice(0, 60) : '');
+  } catch (e) {
+    /* 解析不了就原样打 */
+  }
+  recordUpstream({
+    at: Date.now(),
+    ms: total,
+    queue: t.queue,
+    net: t.net,
+    retry: t.retry,
+    attempts: t.attempts,
+    status: status,
+    failed: failed,
+    url: short,
+  });
+  if (!failed && total < UPSTREAM_SLOW_MS) return;
+  const parts = ['排队 ' + Math.round(t.queue), '网络 ' + Math.round(t.net)];
+  if (t.retry) parts.push('重试退避 ' + Math.round(t.retry));
+  console.log(
+    '[upstream] ' + (failed ? 'FAIL ' : '慢   ') + Math.round(total) + 'ms  (' + parts.join(' / ') + ')' +
+      '  x' + t.attempts + (status ? '  HTTP ' + status : '') + '  ' + short
+  );
+}
+
+/**
+ * 把一段时间内的上游请求汇总成一行 —— 接口慢的时候调，回答"为什么慢"。
+ * 三种典型结论：
+ *   次数多但每次都快      → 是"请求次数"问题（分批/重复取），不是网络
+ *   排队占比高            → 被限流闸门挡住了，调 MIN_GAP_MS 或减少请求数
+ *   网络占比高 + 次数少    → 真的网络/代理慢
+ */
+function summarizeSince(t0) {
+  const list = recentSince(t0);
+  if (!list.length) return '';
+  let ms = 0;
+  let queue = 0;
+  let net = 0;
+  let retry = 0;
+  let failed = 0;
+  let slowest = 0;
+  for (const r of list) {
+    ms += r.ms;
+    queue += r.queue;
+    net += r.net;
+    retry += r.retry;
+    if (r.failed) failed++;
+    if (r.ms > slowest) slowest = r.ms;
+  }
+  const parts = ['上游 ' + list.length + ' 次', '合计 ' + Math.round(ms) + 'ms'];
+  const detail = ['排队 ' + Math.round(queue), '网络 ' + Math.round(net)];
+  if (retry) detail.push('重试退避 ' + Math.round(retry));
+  parts.push('（' + detail.join(' / ') + '）');
+  parts.push('最慢 ' + Math.round(slowest) + 'ms');
+  if (failed) parts.push('失败 ' + failed + ' 次');
+  return parts.join('  ');
 }
 
 /**
@@ -435,21 +547,46 @@ async function requestLimited(url, options) {
   } catch (e) {
     return rawRequest(url, opts);
   }
-  if (opts.noLimit) return rawRequest(url, opts);
+  if (opts.noLimit) {
+    // 不走闸门也要记（图片走的就是这条路），否则"图片为什么慢"没数据
+    const t = { queue: 0, retry: 0, net: 0, attempts: 1, status: 0 };
+    const t0 = Date.now();
+    const n0 = Date.now();
+    const res = await rawRequest(url, opts);
+    t.net = Date.now() - n0;
+    t.status = res && res.status;
+    logUpstream(t, url, Date.now() - t0, res);
+    return res;
+  }
 
+  const t = { queue: 0, retry: 0, net: 0, attempts: 0, status: 0 };
+  const t0 = Date.now();
   let lastRes = null;
   for (let attempt = 0; attempt <= MAX_RETRY; attempt++) {
-    const res = await withHostLimit(host, () => rawRequest(url, opts));
+    const res = await withHostLimit(
+      host,
+      async () => {
+        const n0 = Date.now();
+        const r = await rawRequest(url, opts);
+        t.net += Date.now() - n0;
+        t.attempts++;
+        t.status = r && r.status;
+        return r;
+      },
+      t
+    );
     lastRes = res;
     // 429/403 都是 Steam 的限流信号（403 有时是 Akamai 的软封）
     const retryable = res.status === 429 || res.status === 503 || res.status === 502 || res.status === 403;
-    if (!retryable || attempt === MAX_RETRY) return res;
+    if (!retryable || attempt === MAX_RETRY) break;
     // Retry-After 优先，否则指数退避
     let waitMs = Math.min(8000, 900 * Math.pow(2, attempt));
     const ra = res.headers && res.headers['retry-after'];
     if (ra && /^\d+$/.test(String(ra).trim())) waitMs = Math.min(15000, parseInt(ra, 10) * 1000);
+    t.retry += waitMs;
     await sleep(waitMs);
   }
+  logUpstream(t, url, Date.now() - t0, lastRes);
   return lastRes;
 }
 
@@ -462,6 +599,7 @@ module.exports = {
   postForm,
   postJson,
   postApiForm,
+  summarizeSince,
   DEFAULT_UA,
   MIN_GAP_MS,
 };

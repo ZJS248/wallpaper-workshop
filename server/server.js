@@ -21,6 +21,7 @@ const settings = require('./lib/settings');
 const routes = require('./routes');
 const session = require('./lib/session');
 const frontLog = require('./lib/frontLog');
+const httpClient = require('./lib/httpClient');
 const { HttpError } = require('./lib/util');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -152,8 +153,28 @@ const server = http.createServer(async (req, res) => {
     if (status >= 500) console.error('[error]', pathname, e.stack || e.message);
   } finally {
     if (shouldLog) {
+      const ms = Date.now() - started;
+      /*
+       * 慢接口顺手把上游明细汇总出来。
+       *
+       * 只打"接口 6800ms"是查不下去的 —— 得知道是**打了很多次上游**、
+       * 还是**某一次特别慢**、还是**被限流闸门排队**。httpClient 会把最近的
+       * 上游请求记在环形缓冲里，这里按本请求的时间窗汇总：
+       *   次数多但每次都快   → 是请求次数问题（分批/重复取），不是网络
+       *   排队占比高         → 被 MIN_GAP_MS 挡住了，调限流或减少请求数
+       *   网络占比高+次数少   → 真的网络/代理慢
+       */
+      let sum = '';
+      if (ms > 1500) {
+        try {
+          sum = httpClient.summarizeSince(started);
+        } catch (e) {
+          /* 汇总失败不影响日志 */
+        }
+      }
       console.log(
-        '[api] ' + (req.method || 'GET') + ' ' + pathname + (url.search || '') + '  ' + (Date.now() - started) + 'ms'
+        '[api] ' + (req.method || 'GET') + ' ' + pathname + (url.search || '') + '  ' + ms + 'ms' +
+          (sum ? '\n       ↳ ' + sum : '')
       );
     }
   }

@@ -1212,6 +1212,14 @@ new Vue({
         this.staleFrom = 0;
         this.retryCount = 0;
         this.clearRetry();
+        // 首屏只在第一次成功时记：以后每次翻页再记就没意义了
+        if (!this._firstListLogged) {
+          this._firstListLogged = true;
+          if (window.WLog) {
+            WLog.info('[boot] 首屏列表就绪，距页面开始 ' + Math.round(performance.now()) + 'ms（' +
+              this.items.length + ' 条）');
+          }
+        }
       } catch (e) {
         if (seq !== this.requestSeq) return;
         if (e && e.name === 'AbortError') return;

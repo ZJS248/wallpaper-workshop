@@ -27,21 +27,22 @@
 
   async function request(path, options) {
     const t0 = Date.now();
+    const trace = {};
     try {
-      const out = await requestInner(path, options);
-      if (window.WLog && loggable(path)) WLog.api(path, Date.now() - t0, true);
+      const out = await requestInner(path, options, trace);
+      if (window.WLog && loggable(path)) WLog.api(path, Date.now() - t0, true, '', trace.serverMs);
       return out;
     } catch (e) {
       // 主动取消不算失败（翻页/切筛选本来就会取消上一发），记了只会误导
       const aborted = e && e.name === 'AbortError';
       if (window.WLog && loggable(path) && !aborted) {
-        WLog.api(path, Date.now() - t0, false, (e && e.message) || String(e));
+        WLog.api(path, Date.now() - t0, false, (e && e.message) || String(e), trace.serverMs);
       }
       throw e;
     }
   }
 
-  async function requestInner(path, options) {
+  async function requestInner(path, options, trace) {
     const opts = options || {};
     const res = await fetch(BASE + path, {
       method: opts.method || 'GET',
@@ -49,6 +50,9 @@
       body: opts.body ? JSON.stringify(opts.body) : undefined,
       signal: opts.signal,
     });
+    // 服务端自己处理用了多久（routes.js 回的 X-Api-Ms）。
+    // 和前端的总耗时一对比，就能分清"服务端慢"还是"传输慢"。
+    if (trace) trace.serverMs = res.headers.get('X-Api-Ms');
 
     const text = await res.text();
     let json;

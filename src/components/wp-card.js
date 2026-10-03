@@ -164,14 +164,21 @@ Vue.component('wp-card', {
           <span class="cm cm-note" v-else-if="note" :title="'订阅于 ' + note">{{ note }}</span>
         </div>
         <div class="card-actions" @click.stop>
-          <button class="btn sm" :class="{ on: subscribed }" :disabled="busy"
+          <!--
+            按下要有"实感"：以前只加了 :disabled，而禁用**视觉上毫无变化**，
+            用户根本看不出按钮有没有生效（反馈原话："一直到提示出来之前都不知道
+            按钮是否被我按下"）。现在忙碌时换成转圈 + 文案，点击当下就能看到。
+          -->
+          <button class="btn sm" :class="{ on: subscribed, busy: busy }" :disabled="busy"
                   :title="subscribed ? '取消订阅' : '订阅'" @click="onSubscribe">
-            {{ subscribed ? '已订阅' : '订阅' }}
+            <svg v-if="busy" class="ic xs spin"><use href="#i-refresh"></use></svg>
+            {{ busy ? '处理中' : (subscribed ? '已订阅' : '订阅') }}
           </button>
-          <button class="btn icon sm" :class="{ on: favorited }" :disabled="busy"
+          <button class="btn icon sm" :class="{ on: favorited, busy: busy }" :disabled="busy"
                   :title="favorited ? '取消收藏' : '收藏'" :aria-label="favorited ? '取消收藏' : '收藏'"
                   @click="onFavorite">
-            <svg class="ic" :class="{ solid: favorited }"><use href="#i-heart"></use></svg>
+            <svg v-if="busy" class="ic xs spin"><use href="#i-refresh"></use></svg>
+            <svg v-else class="ic" :class="{ solid: favorited }"><use href="#i-heart"></use></svg>
           </button>
           <button class="btn icon sm" :disabled="busy || !canApply"
                   :title="applyTitle" :aria-label="applyTitle" @click="onApply">
