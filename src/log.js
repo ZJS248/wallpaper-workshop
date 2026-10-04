@@ -176,6 +176,12 @@
    * （死循环、超大循环、巨型 JSON 解析）占住，回调就会**晚到**。
    * 晚到多少，就说明主线程被卡了多久。这是纯前端能拿到的最直接的"卡死"证据。
    * 阈值 400ms：正常渲染抖动不会到这个量级，到了就是真的卡。
+   *
+   * ⚠️ 页面不可见时必须跳过，否则会产生稳定的假阳性。
+   * Chromium 对**隐藏/后台**页面的定时器做节流（大约一分钟才跑一次），
+   * 于是 late 会算成 ~59000ms —— 看起来像"主线程卡了 59 秒"，
+   * 其实只是浏览器在省电。实测：窗口收进托盘后，**每 2 分钟稳定误报一次**，
+   * 很容易把人带向完全错误的方向（我就差点去查这个不存在的 59 秒卡顿）。
    */
   (function watchStall() {
     var last = Date.now();
@@ -184,10 +190,13 @@
       var now = Date.now();
       var late = now - last - INTERVAL;
       last = now;
-      if (late > 400) {
-        WLog.info('[stall] 主线程卡了约 ' + Math.round(late) + 'ms');
-      }
+      // 后台节流不算卡顿；另外刚从后台回来时 last 是旧的，也得重置
+      if (document.hidden) return;
+      if (late > 400) WLog.info('[stall] 主线程卡了约 ' + Math.round(late) + 'ms');
     }, INTERVAL);
+    document.addEventListener('visibilitychange', function () {
+      last = Date.now(); // 回到前台时重新起算，避免把"切回来"当成卡顿
+    });
   })();
 
   /*
