@@ -312,9 +312,18 @@ const MERGE_MAX_VALUES = 12;
  * 超过这个深度就退回轮询合并（并在 mergeMode 里标明），那属于极端翻页。
  */
 const MERGE_PREFIX_MAX_ITEMS = 1200;
-/** 归并前缀状态的存活时间与条数上限（和 pageStore 的上游页缓存同一量级） */
-const MERGE_STATE_TTL_MS = 3 * 60 * 1000;
-const MERGE_STATE_MAX = 24;
+/**
+ * 归并前缀状态的存活时间与条数上限。
+ *
+ * ⚠️ 这里是**滑动过期**（每次取用都续期，见 mergeStateGet），而且给得比较长：
+ * 前缀一旦被丢掉就要重算，而重算期间榜单可能已经位移 ——
+ * 那正是"翻页翻出前面看过的条目"的来源。所以只要用户还在翻页，
+ * 这份前缀就不该过期。3 分钟太短了（用户在一页上停留 3 分钟很正常，
+ * 停留期间会有一堆图片/详情请求，但不一定会碰这个状态）。
+ * 内存由 MERGE_STATE_MAX 兜底（每个前缀最多 1200 条 ≈ 2.4MB）。
+ */
+const MERGE_STATE_TTL_MS = 30 * 60 * 1000;
+const MERGE_STATE_MAX = 12;
 /** 组装一个"每页 N 条"的页时，最多并发打几个上游页 */
 const ASSEMBLE_CONCURRENCY = 4;
 /** GetPublishedFileDetails 的重试次数（noLimit 链路没有内置重试） */
@@ -351,6 +360,7 @@ function mergeStateGet(key) {
     if (Date.now() - hit.at > MERGE_STATE_TTL_MS) {
       MERGE_STATES.delete(key);
     } else {
+      hit.at = Date.now(); // 滑动过期：还在用就别丢，丢了要重算、就会翻出重复
       MERGE_STATES.delete(key);
       MERGE_STATES.set(key, hit);   // LRU
       return hit.state;
@@ -358,7 +368,9 @@ function mergeStateGet(key) {
   }
   const state = {
     need: 0,            // 这份 order 是按"每路前 need 条"算出来的
+    cursor: 0,          // 已经消费到上游的第几个位置（追加时从这里往后取）
     order: [],           // 归并后的有序列表
+    busy: null,          // 正在扩展时的 Promise（串行化用，见 buildMergeOrder）
     totalSum: 0,
     requests: 0,
     upstreamPages: 0,
@@ -423,8 +435,41 @@ function mergeSorted(routes, keyOf) {
  */
 async function buildMergeOrder(state, need, keyOf, ctx) {
   const want = Math.min(need, MERGE_PREFIX_MAX_ITEMS);
-  if (state.need >= want && state.order.length) return state;
 
+  /*
+   * 串行化 —— 这一条是必须的，不是优化。
+   *
+   * 前缀状态是**跨请求共享的可变对象**（这正是"冻结前缀"的意义），
+   * 而扩展它要 await 网络。两个并发请求（前端会预取下一页，加上用户点下一页，
+   * 或者同一页被重试）会各自读到同一个 need / cursor，于是把**同一段条目
+   * 追加两遍** —— 实测第 3 页整页重复第 2 页。日志长这样：
+   *   [append] need=30 cursor=30 新增=30
+   *   [append] need=60 cursor=60 新增=30   ← 第二个用的是过期的 need/cursor
+   * 串行之后，第二个请求进来会先等第一个跑完，再基于新的 need 决定要不要继续。
+   */
+  for (;;) {
+    if (state.need >= want && state.order.length) return state;
+    if (!state.busy) break;
+    await state.busy.catch(function () {});
+  }
+
+  let release = null;
+  state.busy = new Promise(function (r) {
+    release = r;
+  });
+  try {
+    // 等锁期间可能已经被别的请求喂饱了
+    if (state.need >= want && state.order.length) return state;
+    if (state.order.length) return await appendToOrder(state, want, keyOf, ctx);
+    return await initialBuildOrder(state, want, keyOf, ctx);
+  } finally {
+    state.busy = null;
+    release();
+  }
+}
+
+/** 首次构建：整段取一次 */
+async function initialBuildOrder(state, want, keyOf, ctx) {
   const res = await mapLimit(ctx.values, MERGE_CONCURRENCY, (v) =>
     ctx.runQuery(ctx.andTagsAll.concat(v ? [v] : []), 0, want, { noLimit: true })
   );
@@ -451,9 +496,99 @@ async function buildMergeOrder(state, need, keyOf, ctx) {
     state.order = all;   // 保持上游顺序
   }
   state.need = want;
+  state.cursor = want;
   state.requests += ok.length;
   state.upstreamPages += ok.reduce((a, r) => a + (r.upstreamPages || 0), 0);
   state.totalSum = ok.reduce((a, r) => Math.max(a, r.totalCount || 0), 0);
+  return state;
+}
+
+/** 追加轮数上限：只在"去重吃掉了条目"时才需要多取一轮，正常一轮就够 */
+const APPEND_MAX_ROUNDS = 3;
+
+/**
+ * 把前缀从 state.need 条追加到 want 条（**不碰已有的部分**）。
+ *
+ * 这是"翻页出现前面看过的条目"的根治办法。原来每次都 `runQuery(0, want)`
+ * 把整段前缀重取一遍，理由是"同一批 URL → pageStore 返回同一份对象"，
+ * 所以结果确定。但**只要其中任何一页的缓存过期**（停顿超过 3 分钟就会），
+ * 重取回来的前缀就和前几页用的那份不是同一份数据了：
+ * mostrecent 是实时榜单，停顿这几分钟里已经位移，
+ * 于是切片位置整体错位，第 N 页混进第 N-1 页看过的条目
+ * （用户实测第 5 页"已隐藏 20 个前面出现过的"）。
+ *
+ * 追加为什么安全：能走到这里说明排序键是**位置键**
+ *   - keyOf 为 null：保持上游顺序拼接，更深的一段本来就排在后面；
+ *   - keyOf 非 null：只有 MERGE_KEYS[sort].exact 的排序才会用归并前缀
+ *     （mostrecent / lastupdated / mostsubscribed），它们的键同样"越深越小"。
+ * 新取到的一段接在尾部，**前面已发出去的页永远不变** —— 这才叫"冻结前缀"。
+ *
+ * 代价：榜单在你停留期间若大幅变动，你会看到几分钟前的快照。
+ * 这比"翻出一堆重复、还少半页内容"要好得多。
+ *
+ * 为什么要多轮：新取到的一段可能和已有前缀重叠（榜单位移），去重后就不够数了，
+ * 这时再往后取一小段补上（最多 APPEND_MAX_ROUNDS 轮）——
+ * 不补的话用户会看到 28 条的"半页"，不再重复但也不该平白少两条。
+ */
+async function appendToOrder(state, want, keyOf, ctx) {
+  const seen = new Set();
+  for (const it of state.order) seen.add(it.id);
+
+  const target = want - state.need;
+  let added = 0;
+
+  for (let round = 0; round < APPEND_MAX_ROUNDS && added < target; round++) {
+    /*
+     * 补页时**多要一点**（至少 5 条）。
+     * 因为 assemble 本来就是按整个上游页取的，多要几条不会多花请求；
+     * 而只问 1 条的话，那 1 条很可能又是重复（trend 是滚动榜单，
+     * 位置会挪），于是白跑一轮、页面还是短一条。
+     */
+    const ask = Math.max(target - added, 5);
+    const res = await mapLimit(ctx.values, MERGE_CONCURRENCY, (v) =>
+      ctx.runQuery(ctx.andTagsAll.concat(v ? [v] : []), state.cursor, ask, { noLimit: true })
+    );
+    const ok = res.filter((r) => r && r.ok);
+    if (!ok.length) break;
+
+    const routes = ok.map((r) => r.items || []);
+    const fresh = [];
+    if (keyOf) {
+      for (const it of mergeSorted(routes, keyOf)) {
+        if (!it || seen.has(it.id)) continue;
+        seen.add(it.id);
+        fresh.push(it);
+      }
+    } else {
+      for (const r of routes) {
+        for (const it of r) {
+          if (!it || it.id === undefined || seen.has(it.id)) continue;
+          seen.add(it.id);
+          fresh.push(it);
+        }
+      }
+    }
+    if (process.env.WW_DEBUG_PREFIX) {
+      const got = (routes[0] || []).map((x) => x && x.id);
+      console.log(
+        '[append] want=' + want + ' need=' + state.need + ' target=' + target +
+          ' cursor=' + state.cursor + ' ask=' + ask +
+          ' 取到=' + got.length + ' 首=' + got[0] + ' 尾=' + got[got.length - 1] +
+          ' 新增=' + fresh.length
+      );
+    }
+
+    state.order = state.order.concat(fresh);
+    added += fresh.length;
+    state.cursor += ask;
+    state.requests += ok.length;
+    state.upstreamPages += ok.reduce((a, r) => a + (r.upstreamPages || 0), 0);
+    const sum = ok.reduce((a, r) => Math.max(a, r.totalCount || 0), 0);
+    if (sum) state.totalSum = sum;
+    if (!fresh.length) break;   // 上游到头了，别再空转
+  }
+
+  state.need = want;
   return state;
 }
 
@@ -578,6 +713,26 @@ async function queryWorkshop(params, ctx) {
   const cached = mergeCacheGet(cacheKey);
   if (cached) return Object.assign({}, cached, { cached: true });
 
+  /*
+   * 冻结前缀的状态键：**故意不带 page / pageSize**。
+   *
+   * 前缀是"每路前 N 条"的全局有序列表，按**条**计，和"第几页、每页几条"无关。
+   * 带上 page 会让每一页各建一份状态（第 1 页一份、第 2 页一份…），
+   * 于是 buildMergeOrder 里"按需增长"的设计完全失效 —— 每页都从 0 重新拼一遍。
+   * 更要命的是：只要其中某一页触发重建时赶上上游页缓存过期，
+   * 重建出来的前缀就和前面几页用的那份**不是同一份数据**，
+   * 切片位置整体错位，翻页就出现"前面出现过的条目"（用户报的第 5 页重复 20 条）。
+   * 共用一个前缀状态，所有页切的是同一个数组，才谈得上一致。
+   */
+  const prefixKey = JSON.stringify([
+    sort,
+    common.days,
+    common.search || '',
+    andTagsAll.slice().sort(),
+    orValues.slice().sort(),
+    (common.excludedTags || []).slice().sort(),
+  ]);
+
   /**
    * 跑一路子查询：取出全局下标 [startIndex, startIndex+count) 的条目。
    *
@@ -669,7 +824,7 @@ async function queryWorkshop(params, ctx) {
      * 第 2 页和第 7 页就有交集（实测 8 页里有 4 条重复）。
      * 把前 N 条冻结成一份（按需增长、LRU 命中保证各页看到同一份数据）之后就自洽了。
      */
-    const state = mergeStateGet('S:' + cacheKey);
+    const state = mergeStateGet('S:' + prefixKey);
     const res = await buildMergeOrder(state, page * pageSize, null, {
       values: [null],
       andTagsAll,
@@ -680,6 +835,13 @@ async function queryWorkshop(params, ctx) {
     }
     const from = baseStart;
     const slice = state.order.slice(from, from + pageSize);
+    if (process.env.WW_DEBUG_PREFIX) {
+      console.log(
+        '[prefix] page=' + page + ' need=' + state.need + ' cursor=' + state.cursor +
+          ' orderLen=' + state.order.length + ' from=' + from +
+          ' slice=' + slice.length + ' 首=' + (slice[0] && slice[0].id) + ' 尾=' + (slice[slice.length - 1] && slice[slice.length - 1].id)
+      );
+    }
     const built = buildResult(
       { ok: true, items: slice, totalCount: state.totalSum, urls: [], upstreamPages: state.need ? Math.ceil(state.need / pageStore.UPSTREAM_PAGE_SIZE) : 1 },
       {
@@ -726,8 +888,9 @@ async function queryWorkshop(params, ctx) {
 
   if (keyOf && mergeKey.exact) {
     /* ---- 排序键是不可变的位置键：始终从同一条有序列表切页 ---- */
-    const stateKey = 'P:' + cacheKey;
-    const state = mergeStateGet(stateKey);
+    // 前缀状态同样**不带 page**（理由见上面 prefixKey 的说明）：多选类目这条路径
+    // 之前也是每页各建一份，同一个"前缀不是同一份数据"的毛病。
+    const state = mergeStateGet('P:' + prefixKey);
     const res = await buildMergeOrder(state, needPerRoute, keyOf, { values, andTagsAll, runQuery });
     if (res && res.failed) {
       return { ok: false, reason: res.failed, items: [] };

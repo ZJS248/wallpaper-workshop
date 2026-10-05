@@ -59,7 +59,17 @@ const AUTO_RETRY = 2;
  * 筛选/排序/分页状态的本地持久化。
  *
  * 之前刷新一次页面所有选择就没了（用户明确提过），所以整包存 localStorage：
- * 排序、时间窗、每页条数、页码、搜索词、各类目已选标签、排除标签、隐藏 18+。
+ * 排序、时间窗、**每页条数**、搜索词、各类目已选标签、排除标签、隐藏 18+。
+ *
+ * ⚠️ **页码不恢复，永远从第 1 页开始**（用户指出）：
+ * 页码是"读到哪儿了"的临时位置，不是偏好。恢复页码有两个坏处：
+ *  1. 打开应用直接落在第 3 页，而不是第 1 页 —— 用户要的是"从最新看起"；
+ *  2. 更隐蔽的：启动那一发会把上游第 1..N 页**在同一瞬间**塞进服务端缓存，
+ *     它们的 3 分钟有效期于是同时到期。慢慢翻到第 N+1 页时正好撞上集体过期，
+ *     服务端前缀被重建，而 mostrecent 是实时榜单 —— 已经位移，
+ *     于是新一页里混进上一页看过的条目（实测第 5 页重复 20 条）。
+ *     从第 1 页正常起步时，各页缓存时间是错开的，不会同时过期。
+ *
  * 读取时只做"形状"校验，真正的合法性（标签是否还存在）等 /api/filters 回来再裁。
  */
 const STATE_KEY = 'ww.state.v1';
@@ -108,7 +118,8 @@ function sanitizeFilters(raw) {
     tagGroups: tagGroups,
     exclude: arr(src.exclude),
     hideMature: src.hideMature === undefined ? true : !!src.hideMature,
-    page: Number.isFinite(Number(src.page)) && Number(src.page) > 0 ? Math.floor(Number(src.page)) : 1,
+    // 页码**故意不恢复**（旧版本存过，这里直接丢弃）—— 见文件头 STATE_KEY 的说明
+    page: 1,
     pageSize: [30, 60, 100].indexOf(pageSize) >= 0 ? pageSize : 30,
   };
 }
@@ -740,8 +751,11 @@ new Vue({
   _tickTimer: null,
 
   /**
-   * 筛选状态一变就落 localStorage（含排序 / 时间窗 / 每页 / 页码 / 搜索词 /
+   * 筛选状态一变就落 localStorage（排序 / 时间窗 / 每页 / 搜索词 /
    * 已选标签 / 排除标签 / 隐藏 18+），刷新后原样恢复。
+   *
+   * 注意**没有 page 的 watcher**：页码不恢复（见 STATE_KEY 的说明），
+   * 所以"翻页时落盘"这件事本身就没意义了。
    */
   watch: {
     filters: {
@@ -749,9 +763,6 @@ new Vue({
       handler() {
         this.persistState();
       },
-    },
-    page() {
-      this.persistState();
     },
     /** 筛选栏折叠状态也要记住（刷新后保持用户上次的习惯） */
     filtersCollapsed(v) {
