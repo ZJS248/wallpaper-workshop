@@ -906,6 +906,41 @@ function buildResult(res, meta) {
   // 拿 321 万去除 pageSize 会给出 10 万页这种点不动的页码。
   const totalPages = pageStore.totalPagesFor(totalCount, pageSize);
   const page = Math.max(1, Math.min(meta.page, totalPages));
+
+  /*
+   * 数据完整度自检 —— 专门回答"为什么角标突然不见了"。
+   *
+   * 用户报过"主界面突然不显示分辨率/类型了"，过一会儿又自己好了。
+   * 当时**查日志查不出来**，因为原来只记了"快不快"，没记"数据全不全"。
+   *
+   * 成因：Steam 会**间歇性返回"精简页"**（HTTP 200，但 SSR 结构不全）。
+   * 那种页面里作品条目照样解析得出来（所以卡片正常显示、不报错），
+   * 但 **tags 是空的** → resolution / wallpaperType 为空
+   * → 分辨率角标和类型角标**静默消失**。这正是用户看到的现象。
+   *
+   * 阈值 30%：个别作品本来就可能没有分辨率标签（正常），
+   * 但一页里大面积缺失就是"精简页"的特征，值得记一笔。
+   */
+  (function checkCompleteness() {
+    const list = res.items || [];
+    if (!list.length) return;
+    let noRes = 0;
+    let noType = 0;
+    let noTags = 0;
+    for (const it of list) {
+      if (!it.resolution) noRes++;
+      if (!it.wallpaperType) noType++;
+      if (!it.tags || !it.tags.length) noTags++;
+    }
+    if (noRes <= list.length * 0.3) return;
+    console.log(
+      '[data] 数据不完整  第 ' + page + ' 页 ' + list.length + ' 条里：' +
+        '缺分辨率 ' + noRes + '、缺类型 ' + noType + '、缺标签 ' + noTags +
+        '  → 界面表现为分辨率/类型角标消失。' +
+        '这是 Steam「精简页」的典型特征（HTTP 200 但结构不全），通常重试一次就好。'
+    );
+  })();
+
   return {
     ok: true,
     url: (res.urls && res.urls[0]) || res.url,

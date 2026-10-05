@@ -1176,6 +1176,34 @@ new Vue({
       });
     },
 
+    /**
+     * 渲染后自检：这一页有多少张卡片没渲染出分辨率/类型角标。
+     *
+     * 和后端那条 `[data] 数据不完整` 配对用：
+     *   后端记"接口给的数据全不全"，这里记"界面到底显示出来了没有"。
+     * 两边都有日志，才能区分"数据没给"和"给了但没渲染出来" ——
+     * 用户报"角标突然不见了"时，这个区分决定往哪边查。
+     */
+    checkRenderedBadges(page) {
+      this.$nextTick(() => {
+        const cards = Array.prototype.slice.call(document.querySelectorAll('.card'));
+        if (!cards.length) return;
+        let noRes = 0;
+        let noType = 0;
+        for (const c of cards) {
+          const left = c.querySelector('.card-badges-left');
+          if (!left || !left.querySelector('.badge')) noRes++;
+          if (!c.querySelector('.badge-type')) noType++;
+        }
+        // 个别作品本来就没标签，属于正常；大面积缺失才记
+        if (noRes <= cards.length * 0.3 && noType <= cards.length * 0.3) return;
+        if (window.WLog) {
+          WLog.info('[data] page=' + page + ' 卡片 ' + cards.length + ' 张里：缺分辨率角标 ' +
+            noRes + '、缺类型角标 ' + noType + '（若后端没有对应的"数据不完整"日志，就是渲染层的问题）');
+        }
+      });
+    },
+
     async loadList(opts) {
       const force = opts && opts.force;
       if (this.mode === 'author' && this.authorView) return this.loadAuthor(force);
@@ -1200,6 +1228,7 @@ new Vue({
         this.applyPageDedup(data.page || this.filters.page, data.items || []);
         this.loadFileSizes(this.items);
         this.trackImages(this.page || this.filters.page);
+        this.checkRenderedBadges(this.page || this.filters.page);
         // 订阅角标（要翻完用户所有订阅，5~10 秒）放到列表出来之后再拉，
         // 免得它跟列表抢上游带宽 —— 这就是"订阅接口 9 秒、列表一直转圈"的成因。
         if (!this._subsLoaded) {
