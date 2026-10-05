@@ -100,6 +100,11 @@
       <button class="status-pill" :class="loginState" :title="loginTitle" @click="openSettings('account')">
         <span class="dot"></span>{{ loginText }}
       </button>
+      <!-- 桌面壳专用：Electron 窗口在平板/触屏上很卡，给一个走系统浏览器的出口 -->
+      <button class="ic-btn" v-if="isDesktop" title="在浏览器中打开（窗口卡顿时用这个）"
+              aria-label="在浏览器中打开" @click="openInBrowser">
+        <svg class="ic"><use href="#i-globe"></use></svg>
+      </button>
       <button class="ic-btn" title="设置" aria-label="设置" @click="openSettings()">
         <svg class="ic"><use href="#i-sliders"></use></svg>
       </button>

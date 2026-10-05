@@ -657,6 +657,23 @@ ipcMain.handle('ww:hide-to-tray', () => {
   return true;
 });
 ipcMain.handle('ww:open-data-dir', () => shell.openPath(app.getPath('userData')));
+/*
+ * 用系统默认浏览器打开本地页面。
+ *
+ * 用户反馈 Electron 窗口在平板/触屏设备上很卡，想要一个"用浏览器看"的入口。
+ * 这里固定打开 BASE，**不接受页面传 URL** —— 少一个参数就少一条注入路径，
+ * 而且页面本来也只可能想打开它自己。
+ */
+ipcMain.handle('ww:open-in-browser', async () => {
+  try {
+    await shell.openExternal(BASE);
+    logToFile('open-in-browser', '用系统浏览器打开 ' + BASE);
+    return true;
+  } catch (e) {
+    logToFile('open-in-browser-failed', e);
+    return false;
+  }
+});
 ipcMain.handle('ww:info', () => ({
   isDesktop: true,
   port: PORT,

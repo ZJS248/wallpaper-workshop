@@ -923,6 +923,25 @@ input::placeholder, textarea::placeholder { color: #5d6b7a; }
 .dep-note b { color: #f0d69a; }
 .dep-note-list { margin: 4px 0 0; padding-left: 16px; }
 .dep-note-list li { margin: 1px 0; }
+/*
+ * 依赖项做成可点的按钮：用户原话"我都不知道关联的壁纸是个什么玩意"。
+ * 用下划线 + 悬停变色表达"这是能点的"，而不是靠加边框（会显得很重）。
+ */
+.dep-link {
+  display: inline-flex; align-items: center; gap: 5px;
+  max-width: 100%; padding: 1px 2px; margin-left: -2px;
+  background: none; border: 0; border-radius: var(--r-sm);
+  color: #f0d69a; font: inherit; line-height: 1.5; text-align: left; cursor: pointer;
+  transition: color var(--t-fast), background var(--t-fast);
+}
+.dep-link .ic { margin-top: 0; }
+.dep-link:hover { color: #fff; background: rgba(210, 153, 34, .16); }
+.dep-link:hover span { text-decoration: underline; }
+/* 已订阅的依赖：降饱和，视觉上让位给"还缺哪些" */
+.dep-done { margin-top: 6px; color: #a9b6a9; font-size: var(--fs-xs); }
+.dep-done .dep-link { color: #9fb0a0; }
+.dep-done .dep-link .ic { color: #6f8f74; }
+.dep-done .dep-link:hover { color: #d8e4d8; }
 
 /* --- 折叠块 --- */
 .fold {

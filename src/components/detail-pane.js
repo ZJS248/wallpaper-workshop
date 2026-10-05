@@ -132,6 +132,10 @@ Vue.component('detail-pane', {
     missingDeps() {
       return this.requiredItems.filter((d) => !d.subscribed);
     },
+    /** 已订的依赖项：也列出来并且可点，用户想知道"依赖的到底是个什么玩意" */
+    subscribedDeps() {
+      return this.requiredItems.filter((d) => d.subscribed);
+    },
   },
   watch: {
     'detail.id'() {
@@ -181,6 +185,19 @@ Vue.component('detail-pane', {
     },
     pickRelated(it) {
       this.$emit('pick', it);
+    },
+    /**
+     * 点依赖项 → 直接打开那个壁纸的详情。
+     *
+     * 用户反馈：依赖提示里只写了一串标题，"我都不知道关联的壁纸是个什么玩意"。
+     * 依赖项来自详情页的「必需物品」块，只带了 id + 标题（没有预览图），
+     * 所以走和"相关壁纸"同一条路：把 {id, title} 交给上层 selectItem，
+     * 由它去拉完整详情 —— 点一下就能看到图、评分、订阅数。
+     */
+    pickDep(d) {
+      if (!d || !d.id) return;
+      if (window.WLog) WLog.act('打开依赖壁纸', { id: d.id, title: d.title });
+      this.$emit('pick', { id: d.id, title: d.title });
     },
     setPreview(i) {
       this.previewIndex = i;
@@ -270,13 +287,28 @@ Vue.component('detail-pane', {
           <div class="dep-note" v-if="missingDeps.length">
             <svg class="ic"><use href="#i-alert"></use></svg>
             <div>
-              这个壁纸依赖下面 {{ missingDeps.length }} 个壁纸，<b>只订阅它是用不了的</b>：
+              这个壁纸依赖下面 {{ missingDeps.length }} 个壁纸，<b>只订阅它是用不了的</b>（点击标题可查看）：
               <ul class="dep-note-list">
-                <li v-for="d in missingDeps" :key="d.id">{{ d.title }}</li>
+                <li v-for="d in missingDeps" :key="d.id">
+                  <button type="button" class="dep-link" :title="'查看「' + d.title + '」'"
+                          @click="pickDep(d)">
+                    <svg class="ic tiny"><use href="#i-external"></use></svg>
+                    <span>{{ d.title }}</span>
+                  </button>
+                </li>
               </ul>
-              <span v-if="requiredItems.length > missingDeps.length" class="dim">
-                （另有 {{ requiredItems.length - missingDeps.length }} 个依赖已订阅）
-              </span>
+              <div class="dep-done" v-if="subscribedDeps.length">
+                已订阅的依赖（{{ subscribedDeps.length }} 个，点击可查看）：
+                <ul class="dep-note-list">
+                  <li v-for="d in subscribedDeps" :key="d.id">
+                    <button type="button" class="dep-link" :title="'查看「' + d.title + '」'"
+                            @click="pickDep(d)">
+                      <svg class="ic tiny"><use href="#i-check"></use></svg>
+                      <span>{{ d.title }}</span>
+                    </button>
+                  </li>
+                </ul>
+              </div>
             </div>
           </div>
 

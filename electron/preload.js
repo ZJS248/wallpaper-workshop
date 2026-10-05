@@ -14,5 +14,11 @@ contextBridge.exposeInMainWorld('WWDesktop', {
   setAutoLaunch: (on) => ipcRenderer.invoke('ww:set-auto-launch', !!on),
   hideToTray: () => ipcRenderer.invoke('ww:hide-to-tray'),
   openDataDir: () => ipcRenderer.invoke('ww:open-data-dir'),
+  /**
+   * 用系统默认浏览器打开本地页面。
+   * 不能走 window.open：主进程的 setWindowOpenHandler 对同源地址是 allow，
+   * 结果是在 Electron 里又开一个窗口，等于没换浏览器（用户嫌 Electron 窗口卡）。
+   */
+  openInBrowser: () => ipcRenderer.invoke('ww:open-in-browser'),
   info: () => ipcRenderer.invoke('ww:info'),
 });

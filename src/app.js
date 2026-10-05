@@ -263,6 +263,10 @@ new Vue({
   },
 
   computed: {
+    /** 跑在桌面壳（Electron）里吗？浏览器直接访问时 window.WWDesktop 不存在 */
+    isDesktop() {
+      return !!(typeof window !== 'undefined' && window.WWDesktop);
+    },
     /** 每页条数：30 / 60 / 100（上游恒 30 条/页，多出来的由后端拼页实现） */
     pageSizeOptions() {
       return (this.meta && this.meta.pageSizeOptions) || DEFAULT_PAGE_SIZES;
@@ -1545,6 +1549,26 @@ new Vue({
 
     onPageSizeChange(e) {
       this.applyFilters({ pageSize: Number(e.target.value) });
+    },
+
+    /**
+     * 用系统默认浏览器打开当前页面。
+     * 桌面壳里走主进程的 shell.openExternal（window.open 同源会被放行，
+     * 结果还是在 Electron 里开窗口，等于没换浏览器）；浏览器里就新开一个标签页。
+     */
+    async openInBrowser() {
+      if (window.WLog) WLog.act('在浏览器打开');
+      if (this.isDesktop && window.WWDesktop && window.WWDesktop.openInBrowser) {
+        try {
+          const ok = await window.WWDesktop.openInBrowser();
+          if (!ok && window.WLog) WLog.info('[ui] 调起系统浏览器失败（shell.openExternal 返回 false）');
+          return;
+        } catch (e) {
+          if (window.WLog) WLog.info('[ui] 调起系统浏览器异常：' + ((e && e.message) || e));
+          // 主进程这条路走不通就退回到页面自己开，至少别让按钮点了没反应
+        }
+      }
+      window.open(location.origin, '_blank', 'noopener');
     },
 
     goPage(p) {
