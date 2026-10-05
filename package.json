@@ -1,7 +1,7 @@
 {
   "name": "wallpaper-workshop",
   "private": true,
-  "version": "1.0.11",
+  "version": "1.0.12",
   "description": "Wallpaper Engine 创意工坊客户端：浏览 / 搜索 / 筛选 / 排序 / 订阅 / 收藏，可独立运行，也可作为子应用接入 wallpaper-manager",
   "type": "commonjs",
   "main": "electron/main.js",

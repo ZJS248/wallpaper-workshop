@@ -676,7 +676,21 @@ input::placeholder, textarea::placeholder { color: #5d6b7a; }
 }
 .card:hover .card-overlay,
 .card:focus-within .card-overlay { opacity: 1; transform: none; pointer-events: auto; }
-@media (hover: none) { .card-overlay { opacity: 1; transform: none; pointer-events: auto; } }
+/*
+ * 触摸设备（平板模式）：没有 hover，所以浮层改成常显，否则标题和操作按钮够不着。
+ *
+ * ⚠️ 但常显会**盖住角标**：浮层 z-index 3，角标 z-index 2。
+ * 用户实测："平板笔记本上分辨率/类型角标突然不见了，插上键盘就正常了" ——
+ * 就是这里：插上键盘后系统重新报告"有悬停能力"，这个媒体查询失效，
+ * 浮层退回隐藏态，角标才重新露出来。跟数据、跟渲染都没关系，纯粹是被盖住了。
+ *
+ * 修法：角标提到浮层之上（4），并给浮层底部留出 30px，
+ * 免得它那排操作按钮和角标挤在一起。
+ */
+@media (hover: none) {
+  .card-overlay { opacity: 1; transform: none; pointer-events: auto; padding-bottom: 30px; }
+  .card-badges-left, .badge-type { z-index: 4; }
+}
 
 .card-title {
   color: #fff; font-size: var(--fs-sm); line-height: var(--lh-sm); font-weight: 500;
