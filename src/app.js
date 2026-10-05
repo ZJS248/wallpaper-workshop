@@ -38,6 +38,16 @@ const DEFAULT_DAY_OPTIONS = [
 const DEFAULT_PAGE_SIZES = [30, 60, 100];
 
 /**
+ * 「订阅前查依赖」这一步的超时。
+ *
+ * 它是一次**可选的前置检查**，却要拉一次详情页 —— 而详情页被 Steam 限流时
+ * 服务端要重试 5 次、耗时 20~40 秒。用户看到的就是"点了订阅一直没反应"
+ * （实测就是这条把订阅卡住的，不是订阅本身）。
+ * 所以给它一个硬超时，超时按"没查到依赖"放行：宁可漏一次提示，也不要卡住用户。
+ */
+const REQUIRED_LOOKUP_MS = 8000;
+
+/**
  * 列表/详情请求失败后自动重试的次数。
  * 上游（经代理访问 Steam）握手失败很常见，实测 3 分钟内会出现 6 次以上
  * 「Client network socket disconnected before secure TLS connection was established」。
@@ -1943,14 +1953,41 @@ new Vue({
       }
       const hit = this._requiredCache && this._requiredCache[id];
       if (hit && Date.now() - hit.at < 5 * 60 * 1000) return hit.items;
+
+      /*
+       * 带硬超时（见 REQUIRED_LOOKUP_MS）：查依赖是"可选前置检查"，不能拖住订阅。
+       *
+       * 两道保险，缺一不可：
+       *  1. abort signal —— 让底层 fetch 真正取消，别让请求白白占着浏览器连接
+       *  2. Promise.race —— 万一底层不理会 signal（桩、旧实现、解析阶段卡住），
+       *     这一步也必须在超时后放行。只靠 signal 的话，一旦没人响应它，
+       *     订阅就会永远卡在这里（这正是用户遇到的"一直挂起"）。
+       */
+      const ac = typeof AbortController === 'function' ? new AbortController() : null;
+      let timer = null;
+      const req = api.item(id, ac ? ac.signal : undefined);
+      // 超时后这一发还会 reject，提前挂个空 handler，免得变成未处理的 Promise 异常
+      req.catch(function () {});
+      const timeout = new Promise(function (_, reject) {
+        timer = setTimeout(function () {
+          if (ac) ac.abort();
+          reject(Object.assign(new Error('依赖查询超过 ' + REQUIRED_LOOKUP_MS + 'ms'), { name: 'TimeoutError' }));
+        }, REQUIRED_LOOKUP_MS);
+      });
       try {
-        const r = await api.item(id);
+        const r = await Promise.race([req, timeout]);
         const items = Array.isArray(r.requiredItems) ? r.requiredItems : [];
         this._requiredCache = Object.assign({}, this._requiredCache, { [id]: { at: Date.now(), items } });
         return items;
       } catch (e) {
         // 查不到依赖不算失败：宁可漏一次提示，也不要拦住用户订阅
+        if (window.WLog) {
+          const why = e && (e.name === 'TimeoutError' || e.name === 'AbortError') ? '超时' : (e && e.message) || e;
+          WLog.info('[deps] 依赖查询放弃（' + why + '），按"无依赖"继续订阅');
+        }
         return null;
+      } finally {
+        clearTimeout(timer);
       }
     },
 
@@ -1970,21 +2007,42 @@ new Vue({
         this.showToast('需要登录 Steam 才能订阅', 'warn');
         return;
       }
-      // 用"Steam 订阅 ∪ 本地库"判断当前状态，否则 Cookie 失效时会把已订阅的当成未订阅
-      const willSub = !this.isSubscribedId(id);
-      if (!willSub) return this.runSubscribe(item, false, []);
+      /*
+       * 防连点：**在查依赖之前**就置忙碌。
+       *
+       * 旧实现在 runSubscribe 里才置位，而订阅前要先查一次依赖（要拉详情页）。
+       * 详情页被限流时这一步要几十秒，期间按钮一直可点 —— 用户以为没反应就再点，
+       * 于是同一件作品并发发出好几发请求，全都打在同一个正在限流的页面上，
+       * 越点越慢（实测用户点了 3 次，日志里 12 条 429）。
+       */
+      if (this.busyIds && this.busyIds[id]) {
+        if (window.WLog) WLog.info('[ui] 该作品正在处理中，忽略这次重复点击');
+        return;
+      }
+      this.markBusy(id, true);
+      try {
+        // 用"Steam 订阅 ∪ 本地库"判断当前状态，否则 Cookie 失效时会把已订阅的当成未订阅
+        const willSub = !this.isSubscribedId(id);
+        if (!willSub) return await this.runSubscribe(item, false, []);
 
-      // 订阅前查依赖
-      const deps = await this.requiredItemsOf(item);
-      const missing = (deps || []).filter((d) => !d.subscribed && !this.isSubscribedId(d.id));
-      if (!missing.length) return this.runSubscribe(item, true, []);
+        // 订阅前查依赖（内部有超时，见 REQUIRED_LOOKUP_MS）
+        const deps = await this.requiredItemsOf(item);
+        const missing = (deps || []).filter((d) => !d.subscribed && !this.isSubscribedId(d.id));
+        if (!missing.length) return await this.runSubscribe(item, true, []);
 
-      // 有没订的依赖 → 弹窗问（确认/取消分别走 onConfirmDeps / onConfirmCancel）
-      this.confirm = {
-        kind: 'deps',
-        item: item,
-        deps: missing,
-      };
+        // 有没订的依赖 → 弹窗问（确认/取消分别走 onConfirmDeps / onConfirmCancel）
+        this.confirm = {
+          kind: 'deps',
+          item: item,
+          deps: missing,
+        };
+      } finally {
+        /*
+         * 交给 runSubscribe 的两条路径，它自己会在结束时放开（这里再放开一次也无害）；
+         * 弹窗那条路径**必须**在这里放开，否则用户点不动确认按钮。
+         */
+        this.markBusy(id, false);
+      }
     },
 
     /** 确认弹窗：一起订阅 */

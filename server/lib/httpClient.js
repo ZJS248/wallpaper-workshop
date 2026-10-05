@@ -396,6 +396,68 @@ const HOST_STATE = new Map(); // host -> { chain: Promise, slot: number(下一�
 const MIN_GAP_MS = 1200;      // 同一 host 两次请求的最小间隔
 const MAX_RETRY = 4;
 
+/*
+ * 429 熔断（冷却）。
+ *
+ * 没有它的时候，一次临时限流会被**成倍放大**：每个调用方都各自重试 5 次，
+ * 而且这些重试还要串行过闸门。实测用户点了一次订阅（前置的详情页被限流），
+ * 日志里就留下 12 条 429、实际打了 60 次上游请求 —— 限流不但没缓解，
+ * 反而因为我们自己的重试持续得更久（越重试越 429）。
+ *
+ * 所以：某个资源一旦回 429，接下来 COOLDOWN_MS 内直接快速失败，
+ * **不再发请求**。反正这几秒里再打大概率还是 429。
+ */
+const COOLDOWN_MS = 60 * 1000;
+const COOLDOWN = new Map(); // coolKey(url) -> 可以再请求的时刻
+
+/**
+ * 冷却键。带不带 `l=schinese` 要算同一个资源 —— 实测 Steam 对
+ * `filedetails/?id=X` 和 `filedetails/?id=X&l=schinese` 是同一个限流桶，
+ * 用完整 URL 当键会让两条冷却互相独立，白白多挨一轮 429。
+ */
+function coolKey(url) {
+  try {
+    const u = new URL(url);
+    const params = [];
+    u.searchParams.forEach((v, k) => {
+      if (k !== 'l') params.push(k + '=' + v);
+    });
+    params.sort();
+    return u.host + u.pathname + (params.length ? '?' + params.join('&') : '');
+  } catch (e) {
+    return String(url);
+  }
+}
+
+/** 给日志用的短 URL */
+function shortUrl(url) {
+  try {
+    const u = new URL(url);
+    return u.host + u.pathname + (u.search ? u.search.slice(0, 60) : '');
+  } catch (e) {
+    return String(url);
+  }
+}
+
+/** 把某个资源标记为"冷却中"。ms 为 0 时用默认时长 */
+function markCooldown(url, ms) {
+  const key = coolKey(url);
+  COOLDOWN.set(key, Date.now() + (ms > 0 ? ms : COOLDOWN_MS));
+  // 顺手清理过期的，别让这个 Map 无限长（正常也就几十个键）
+  if (COOLDOWN.size > 500) {
+    const now = Date.now();
+    COOLDOWN.forEach((until, k) => {
+      if (until <= now) COOLDOWN.delete(k);
+    });
+  }
+}
+
+/** 还剩多少毫秒冷却，0 表示可以正常请求 */
+function coolingLeft(url) {
+  const until = COOLDOWN.get(coolKey(url)) || 0;
+  return until > Date.now() ? until - Date.now() : 0;
+}
+
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -476,13 +538,7 @@ function recentSince(t0) {
 function logUpstream(t, url, total, res) {
   const status = (res && res.status) || 0;
   const failed = !res || status >= 400;
-  let short = url;
-  try {
-    const u = new URL(url);
-    short = u.host + u.pathname + (u.search ? u.search.slice(0, 60) : '');
-  } catch (e) {
-    /* 解析不了就原样打 */
-  }
+  const short = shortUrl(url);
   recordUpstream({
     at: Date.now(),
     ms: total,
@@ -547,6 +603,19 @@ async function requestLimited(url, options) {
   } catch (e) {
     return rawRequest(url, opts);
   }
+  /*
+   * 冷却中：直接快速失败，不发请求（见 COOLDOWN_MS 的说明）。
+   *
+   * ⚠️ 这个检查必须在 noLimit 分支**之前**：浏览页/详情页走的都是 noLimit，
+   * 放到后面等于对主要路径完全没生效（第一版就踩了这个坑，一测就发现
+   * 冷却期间还是真去打网络了）。
+   */
+  const cool = coolingLeft(url);
+  if (cool > 0) {
+    console.log('[upstream] 冷却中（' + Math.ceil(cool / 1000) + 's 后重试，本次不发请求）  ' + shortUrl(url));
+    return { status: 429, headers: {}, body: '', cooled: true, url: url };
+  }
+
   if (opts.noLimit) {
     // 不走闸门也要记（图片走的就是这条路），否则"图片为什么慢"没数据
     const t = { queue: 0, retry: 0, net: 0, attempts: 1, status: 0 };
@@ -555,6 +624,7 @@ async function requestLimited(url, options) {
     const res = await rawRequest(url, opts);
     t.net = Date.now() - n0;
     t.status = res && res.status;
+    if (res && res.status === 429) markCooldown(url);
     logUpstream(t, url, Date.now() - t0, res);
     return res;
   }
@@ -576,8 +646,22 @@ async function requestLimited(url, options) {
       t
     );
     lastRes = res;
-    // 429/403 都是 Steam 的限流信号（403 有时是 Akamai 的软封）
-    const retryable = res.status === 429 || res.status === 503 || res.status === 502 || res.status === 403;
+    /*
+     * 429 = Steam 明确说"别打了"。**立刻停止重试 + 进冷却**。
+     *
+     * 实测（2026-10-05 用户点订阅）：一个详情页被 429 后，我们按老逻辑
+     * 又重试了 5 次 × 多个调用方，日志里留下 12 条 429、实际打了 60 次请求 ——
+     * 限流不但没缓解，反而被我们自己的重试拖得更久。重试在这里是纯放大。
+     * 有 Retry-After 就按它冷却，没有就用默认值。
+     */
+    if (res && res.status === 429) {
+      const ra = res.headers && res.headers['retry-after'];
+      const raSec = ra && /^\d+$/.test(String(ra).trim()) ? parseInt(ra, 10) : 0;
+      markCooldown(url, raSec ? Math.min(raSec * 1000, 5 * 60 * 1000) : 0);
+      break;
+    }
+    // 502/503/403 是"服务端打嗝"，重试有意义（403 有时是 Akamai 的软封）
+    const retryable = res.status === 503 || res.status === 502 || res.status === 403;
     if (!retryable || attempt === MAX_RETRY) break;
     // Retry-After 优先，否则指数退避
     let waitMs = Math.min(8000, 900 * Math.pow(2, attempt));
@@ -602,4 +686,8 @@ module.exports = {
   summarizeSince,
   DEFAULT_UA,
   MIN_GAP_MS,
+  COOLDOWN_MS,
+  // 冷却状态：给自检/排查用（"这个 URL 是不是还在冷却"）
+  coolingLeft,
+  markCooldown,
 };

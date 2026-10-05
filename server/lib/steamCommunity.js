@@ -469,7 +469,13 @@ async function fetchBrowse(opts) {
       }
 
       if (res.status !== 200) {
-        last = { ok: false, reason: 'Steam 返回 HTTP ' + res.status, status: res.status, items: [], url };
+        const reason =
+          res.status === 429
+            ? 'Steam 限流了（HTTP 429）：这一页刚被访问得太频繁，等 1 分钟左右再试'
+            : 'Steam 返回 HTTP ' + res.status;
+        last = { ok: false, reason: reason, status: res.status, items: [], url };
+        // 429 直接放弃，别再试语言变体（只会加重限流）
+        if (res.status === 429) return last;
         continue;
       }
 
@@ -565,7 +571,17 @@ async function fetchDetail(opts) {
       continue;
     }
     if (res.status !== 200) {
-      last = { ok: false, reason: 'Steam 返回 HTTP ' + res.status, status: res.status, url };
+      /*
+       * 429 要单独说清楚：加了上游冷却之后它会**立刻**返回（不再重试几十秒），
+       * 所以文案得能指导用户下一步 —— 不然突然弹个失败比转圈更让人困惑。
+       */
+      const reason =
+        res.status === 429
+          ? 'Steam 限流了（HTTP 429）：这个页面刚被访问得太频繁，等 1 分钟左右再点一次'
+          : 'Steam 返回 HTTP ' + res.status;
+      last = { ok: false, reason: reason, status: res.status, url };
+      // 429 直接放弃，别再试后面的语言/URL 变体（只会加重限流）
+      if (res.status === 429) return last;
       continue;
     }
     const parsed = parseDetailHtml(res.body, id, url, res.setCookies);

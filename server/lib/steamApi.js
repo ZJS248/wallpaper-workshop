@@ -1579,6 +1579,21 @@ async function whoAmI(ctx) {
  * 这是订阅/收藏接口不返回 401 的关键。
  */
 async function acquireSession(ctx, itemId) {
+  /*
+   * 快路径：登录 Cookie 里本来就有 sessionid（Steam 登录时就发了），直接用，
+   * **不请求详情页**。
+   *
+   * 为什么必须加这条：详情页是 Steam 限流最狠的页面，而订阅/收藏/评分
+   * **每个写操作都先走这里**。实测一次限流会让详情页请求重试 5 次、
+   * 耗时 23~38 秒（用户报"点订阅一直挂起"）。而 sessionid 根本不需要问 Steam，
+   * 本地 Cookie 里就有 —— 为拿它去挨一次限流是纯亏。
+   *
+   * 慢路径（Cookie 里确实没有 sessionid）保持原样：去详情页拿，
+   * 顺便用响应里的 Set-Cookie 刷新一份。
+   */
+  const fromCookie = sc.extractSessionId(ctx.cookie);
+  if (fromCookie) return { sessionId: fromCookie, cookie: ctx.cookie };
+
   const detail = await sc.fetchDetail({
     id: itemId || '0',
     cookie: ctx.cookie,
@@ -1627,6 +1642,10 @@ function judgeWrite(status, body) {
       needLogin: true,
       reason: '登录态被 Steam 拒绝（HTTP 401）：Cookie 失效，或该 Cookie 的会话绑定了别的 IP。请重新登录一次。',
     };
+  }
+  if (status === 429) {
+    // 明确的限流：文案要说清"等一会儿再试"，别让用户以为是登录坏了
+    return { ok: false, retryable: true, reason: 'Steam 限流了（HTTP 429），等 1 分钟左右再试一次' };
   }
   if (status !== 200) return { ok: false, reason: 'Steam 返回 HTTP ' + status };
   if (/steam\/login|LoginPage|loginform|you must be logged|not logged in/i.test(text)) {

@@ -25,20 +25,59 @@
     return true;
   }
 
+  /**
+   * 写操作（订阅/收藏/评分）的超时。
+   *
+   * 读接口可以慢慢等（详情页本来就可能十几秒），但写操作必须有个上限：
+   * 上游被 Steam 限流时，后端会重试到几十秒，而前端 fetch **默认没有超时** ——
+   * 表现就是按钮一直停在"处理中…"，用户以为程序挂了（实测就是这个问题）。
+   * 正常情况下这几秒就回来了，45 秒是很宽松的天花板。
+   */
+  const WRITE_TIMEOUT_MS = 45000;
+
   async function request(path, options) {
+    const opts = options || {};
     const t0 = Date.now();
     const trace = {};
+    // 可选超时（见 WRITE_TIMEOUT_MS）。要能和调用方自己的 signal 共存：
+    // 任一先触发都取消这一发。
+    let timer = null;
+    let timedOut = false;
+    let merged = opts;
+    if (opts.timeoutMs && typeof AbortController === 'function') {
+      const ac = new AbortController();
+      const outer = opts.signal;
+      if (outer) {
+        if (outer.aborted) ac.abort();
+        else outer.addEventListener('abort', () => ac.abort(), { once: true });
+      }
+      timer = setTimeout(() => {
+        timedOut = true;
+        ac.abort();
+      }, opts.timeoutMs);
+      merged = Object.assign({}, opts, { signal: ac.signal });
+    }
     try {
-      const out = await requestInner(path, options, trace);
+      const out = await requestInner(path, merged, trace);
       if (window.WLog && loggable(path)) WLog.api(path, Date.now() - t0, true, '', trace.serverMs);
       return out;
     } catch (e) {
+      // 超时要报出来（不然又变成"点了没反应"），它和"用户主动取消"是两回事
+      if (timedOut) {
+        const err = new Error('请求超时（超过 ' + Math.round(opts.timeoutMs / 1000) + ' 秒没响应）');
+        err.status = 0;
+        err.timeout = true;
+        if (window.WLog && loggable(path)) WLog.api(path, Date.now() - t0, false, err.message, trace.serverMs);
+        throw err;
+      }
       // 主动取消不算失败（翻页/切筛选本来就会取消上一发），记了只会误导
       const aborted = e && e.name === 'AbortError';
       if (window.WLog && loggable(path) && !aborted) {
         WLog.api(path, Date.now() - t0, false, (e && e.message) || String(e), trace.serverMs);
       }
       throw e;
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 
@@ -210,13 +249,25 @@
     },
 
     subscribe: function (id, action) {
-      return request('/api/item/subscribe', { method: 'POST', body: { id: id, action: action } });
+      return request('/api/item/subscribe', {
+        method: 'POST',
+        body: { id: id, action: action },
+        timeoutMs: WRITE_TIMEOUT_MS,
+      });
     },
     favorite: function (id, action) {
-      return request('/api/item/favorite', { method: 'POST', body: { id: id, action: action } });
+      return request('/api/item/favorite', {
+        method: 'POST',
+        body: { id: id, action: action },
+        timeoutMs: WRITE_TIMEOUT_MS,
+      });
     },
     vote: function (id, action) {
-      return request('/api/item/vote', { method: 'POST', body: { id: id, action: action } });
+      return request('/api/item/vote', {
+        method: 'POST',
+        body: { id: id, action: action },
+        timeoutMs: WRITE_TIMEOUT_MS,
+      });
     },
 
     session: function () {
