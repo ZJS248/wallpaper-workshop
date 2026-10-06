@@ -217,15 +217,28 @@
         -->
         <div class="empty-title" v-if="mode === 'author'">该作者没有公开的创意工坊作品</div>
         <div class="empty-title" v-else-if="pageNote">翻到这里没有内容了</div>
+        <!--
+          还有一种自相矛盾的情况：上面写着"共 575 万个作品"，网格却是空的。
+          那不是"没有符合条件的作品"，而是**这一发上游没返回数据**（我们自己的 bug）。
+          照着"少选几个标签"去操作只会白折腾，所以单独说清楚并给一个重试按钮。
+        -->
+        <div class="empty-title" v-else-if="totalCount > 0">这一页没取到数据</div>
         <div class="empty-title" v-else>没有符合条件的作品</div>
 
         <div class="empty-sub" v-if="pageNote">{{ pageNote }}</div>
         <div class="empty-sub" v-else-if="blockedOnPage">本页 {{ blockedOnPage }} 个来自你屏蔽的作者</div>
+        <div class="empty-sub" v-else-if="totalCount > 0">
+          筛选条件看着没问题（共 {{ fmtCount(totalCount) }} 个作品），重新加载一下试试
+        </div>
         <div class="empty-sub" v-else-if="mode !== 'author'">试试少选几个标签</div>
 
         <div class="empty-actions">
           <template v-if="pageNote">
             <button class="btn primary" @click="goPage(1)">回到第 1 页</button>
+            <button class="btn" @click="resetFilters">重置筛选</button>
+          </template>
+          <template v-else-if="totalCount > 0">
+            <button class="btn primary" @click="reloadList">重新加载</button>
             <button class="btn" @click="resetFilters">重置筛选</button>
           </template>
           <template v-else>

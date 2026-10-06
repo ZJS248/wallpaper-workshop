@@ -91,8 +91,16 @@ const SORTS = {
  * 本文件按它的**分组、取值、顺序**对齐，中文名对齐 WE 客户端的显示名。
  *
  * 与旧表的差异（用户报的"标签个数对不上 / 选项匹配不上"就是这些）：
- *   - 「常规壁纸(Wallpaper) / 预设(Preset)」在 Steam 里属于 **Category**，
- *     不是 Type；客户端把它们并进"类型"面板，所以这里也并进 type 组。
+ *   - ⚠️ **「常规壁纸(Wallpaper) / 预设(Preset)」属于 Category，不是 Type**。
+ *     旧表把它们并进 type 组（注释里写"客户端把它们并进类型面板"，这个假设是错的，
+ *     实测造成很严重的筛选 bug）：type 组是"组内 OR"，而 Wallpaper 这个 Category
+ *     标签几乎每件作品都带 → 取消勾选「视频」完全不起作用，
+ *     因为 `["Video","Anime","Wallpaper",…]` 这种条目靠 Wallpaper 又被放回来了。
+ *     现在按 Steam 官方分类拆成两个面板：type = 场景/视频/网页，
+ *     category = 常规壁纸/预设。
+ *     （分类依据是浏览页 SSR 里的 `declaredTags.readytouse_tags`，实测：
+ *        Type = Scene | Video | Application | Web
+ *        Category = Wallpaper | Preset | Asset）
  *   - 「应用(Application)」客户端不展示（几乎没人投稿这一类），不再放进 type。
  *   - 旧的 content 组把 Genre + Miscellaneous 混在一起（31 个，还多了一个
  *     Steam 已经不存在的 Tutorial），现在拆成：
@@ -104,7 +112,15 @@ const TAG_GROUPS = [
   {
     key: 'type',
     label: '类型',
-    tags: ['Scene', 'Video', 'Web', 'Wallpaper', 'Preset'],
+    // = Steam 的 Type（Application 客户端不展示，故不含）
+    tags: ['Scene', 'Video', 'Web'],
+  },
+  {
+    key: 'category',
+    label: '种类',
+    // = Steam 的 Category。和「类型」是**两个维度**（组间 AND）：
+    // 一件作品可以是"常规壁纸"同时又带「视频」标签，所以两者不能混在一个 OR 组里。
+    tags: ['Wallpaper', 'Preset'],
   },
   {
     key: 'age',
@@ -332,6 +348,29 @@ const API_RETRY = 2;
 const mapLimit = pageStore.mapLimit;
 
 /**
+ * 回到第 1 页时，如果这份前缀已经用了一会儿，就丢掉重建。
+ *
+ * 为什么需要：前缀是**冻结**的（只追加、绝不重算），这对翻页一致性是必须的，
+ * 但副作用是"最新"会退化成"你第一次翻到这一页时的最新"。
+ * 用户实测："取消一个筛选后，反而多了一些之前没看到的新壁纸" ——
+ * 换筛选条件会新建前缀（于是拿到最新），而原来那份还是旧的，对比之下就显得"凭空多了"。
+ * 第 1 页的语义本来就是"此刻最新的那些"，所以这里让它重新取一次。
+ *
+ * 只在 page === 1 时做，并且有 30 秒冷却：
+ *   - 连续点筛选不会反复重建（那 30 秒里看到的是同一份，反而更稳）；
+ *   - 2 页以后继续从这份新前缀往后切，翻页一致性不受影响。
+ */
+const PREFIX_REFRESH_MS = 30 * 1000;
+function refreshPrefixIfStale(state, page) {
+  if (page !== 1 || !state.order.length) return;
+  if (Date.now() - state.at <= PREFIX_REFRESH_MS) return;
+  state.order = [];
+  state.need = 0;
+  state.cursor = 0;
+  state.at = Date.now();
+}
+
+/**
  * 每种排序对应的"归并键"（越大越靠前）。
  *
  * 只有能从结果字段里还原出排序依据的排序方式才能归并；`trend`（最热门）
@@ -354,8 +393,7 @@ const MERGE_KEYS = {
 const MERGE_STATES = new Map(); // key -> { at, state }
 
 /** 取出（或新建）某个筛选组合的归并前缀状态 */
-function mergeStateGet(key) {
-  const hit = MERGE_STATES.get(key);
+function mergeStateGet(key) {  const hit = MERGE_STATES.get(key);
   if (hit) {
     if (Date.now() - hit.at > MERGE_STATE_TTL_MS) {
       MERGE_STATES.delete(key);
@@ -371,6 +409,7 @@ function mergeStateGet(key) {
     cursor: 0,          // 已经消费到上游的第几个位置（追加时从这里往后取）
     order: [],           // 归并后的有序列表
     busy: null,          // 正在扩展时的 Promise（串行化用，见 buildMergeOrder）
+    at: Date.now(),      // 上次变动时间（用来判断"回到第 1 页该不该重建"）
     totalSum: 0,
     requests: 0,
     upstreamPages: 0,
@@ -497,6 +536,7 @@ async function initialBuildOrder(state, want, keyOf, ctx) {
   }
   state.need = want;
   state.cursor = want;
+  state.at = Date.now();
   state.requests += ok.length;
   state.upstreamPages += ok.reduce((a, r) => a + (r.upstreamPages || 0), 0);
   state.totalSum = ok.reduce((a, r) => Math.max(a, r.totalCount || 0), 0);
@@ -589,6 +629,7 @@ async function appendToOrder(state, want, keyOf, ctx) {
   }
 
   state.need = want;
+  state.at = Date.now();
   return state;
 }
 
@@ -825,6 +866,7 @@ async function queryWorkshop(params, ctx) {
      * 把前 N 条冻结成一份（按需增长、LRU 命中保证各页看到同一份数据）之后就自洽了。
      */
     const state = mergeStateGet('S:' + prefixKey);
+    refreshPrefixIfStale(state, page);
     const res = await buildMergeOrder(state, page * pageSize, null, {
       values: [null],
       andTagsAll,
@@ -835,6 +877,18 @@ async function queryWorkshop(params, ctx) {
     }
     const from = baseStart;
     const slice = state.order.slice(from, from + pageSize);
+    /*
+     * 自检：列表明明是空的，却报了个几百万的总数 —— 那一定是我们自己的 bug
+     * （切片位置超出了前缀长度）。用户看到的正是这种自相矛盾的界面：
+     * "共 575 万个作品" + "没有符合条件的作品"。留一条日志，别让它再无声发生。
+     */
+    if (!slice.length && state.totalSum > 0) {
+      console.log(
+        '[prefix] ⚠️ 空页但总数不为 0：page=' + page + ' from=' + from +
+          ' orderLen=' + state.order.length + ' need=' + state.need + ' cursor=' + state.cursor +
+          ' totalSum=' + state.totalSum + '  ' + JSON.stringify(prefixKey).slice(0, 120)
+      );
+    }
     if (process.env.WW_DEBUG_PREFIX) {
       console.log(
         '[prefix] page=' + page + ' need=' + state.need + ' cursor=' + state.cursor +
@@ -891,6 +945,7 @@ async function queryWorkshop(params, ctx) {
     // 前缀状态同样**不带 page**（理由见上面 prefixKey 的说明）：多选类目这条路径
     // 之前也是每页各建一份，同一个"前缀不是同一份数据"的毛病。
     const state = mergeStateGet('P:' + prefixKey);
+    refreshPrefixIfStale(state, page);
     const res = await buildMergeOrder(state, needPerRoute, keyOf, { values, andTagsAll, runQuery });
     if (res && res.failed) {
       return { ok: false, reason: res.failed, items: [] };
@@ -901,6 +956,13 @@ async function queryWorkshop(params, ctx) {
 
     const from = (page - 1) * pageSize;
     let mergedItems = state.order.slice(from, from + pageSize);
+    // 自检：切片为空但前缀里明明有东西 → 下标错位（同单选路径那条日志）
+    if (!mergedItems.length && state.order.length && page > 1) {
+      console.log(
+        '[prefix] ⚠️ 多选路径空页：page=' + page + ' from=' + from +
+          ' orderLen=' + state.order.length + ' need=' + state.need + ' cursor=' + state.cursor
+      );
+    }
 
     // 复查：剔除没有命中全部多选类目的条目（与旧实现口径一致）
     const before = mergedItems.length;
@@ -926,7 +988,13 @@ async function queryWorkshop(params, ctx) {
       mergePerRoute: state.need,
       mergePerRoutePages: perRoutePages,
       droppedFullGroups: droppedFullGroups,
-      mergeRequests: state.requests,
+      /*
+       * 这次查询合并了几路 —— 就是"多选类目里一共勾了几个值"。
+       * ⚠️ 不能报 state.requests：那是**前缀状态累计**的上游请求数
+       * （前缀是跨请求共享的，翻几页就累到几十），拿它当"本次合并路数"是错的
+       * （用户看到过"已合并 35 路"，而实际只有 7 路）。
+       */
+      mergeRequests: values.length,
       mergeUpstreamPages: state.upstreamPages,
       mergedGroups: rawGroups,
       mergedValues: values,

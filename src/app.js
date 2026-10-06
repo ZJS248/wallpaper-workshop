@@ -1485,6 +1485,19 @@ new Vue({
       this.retryNow();
     },
 
+    /**
+     * 「重新加载」按钮：清掉跨页去重的记忆，再重拉当前这一页。
+     *
+     * 为什么必须清 seenIds：万一上一次的空白正是"去重把整页都丢了"
+     * （seenIds 里已经攒着这些 id），不清掉的话重拉回来还是会被整页丢掉，
+     * 按钮就白点了。顺手把 droppedDupes 归零，让提示条也跟着消失。
+     */
+    reloadList() {
+      this.seenIds = Object.create(null);
+      this.droppedDupes = 0;
+      this.loadList({ force: true });
+    },
+
     submitSearch() {
       const q = this.searchInput.trim();
       if (q === this.filters.search) {
