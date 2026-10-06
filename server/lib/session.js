@@ -193,8 +193,21 @@ async function verifySession(opts) {
   }
   const ctx = currentContext();
   const who = await steamApi.whoAmI(ctx);
-  if (who && who.loggedIn) markValid();
-  else markInvalid((who && who.reason) || '登录态无效');
+  if (who && who.loggedIn) {
+    markValid();
+  } else if (who && who.networkError) {
+    /*
+     * 网络不通（代理没起来 / DNS 被污染）**不是**登录态失效。
+     *
+     * 旧实现这里直接 markInvalid，于是代理一挂，顶栏就红着"登录态失效"——
+     * 用户以为 Cookie 坏了，反复重贴一个明明能用的 Cookie，怎么都不好使
+     * （用户实测报过）。这里什么都不改：登录态维持原状，如实把网络错误报出去。
+     */
+    logEvent('verify', '网络不通，未改动登录态：' + (who.reason || ''));
+    return Object.assign({}, who, { session: sessionStatus(), networkError: true });
+  } else {
+    markInvalid((who && who.reason) || '登录态无效');
+  }
   runtime.lastVerify = { at: Date.now(), loggedIn: !!(who && who.loggedIn), reason: (who && who.reason) || '' };
   logEvent('verify', who.loggedIn ? '登录态有效' : '登录态无效：' + (who.reason || ''));
   return Object.assign({}, who, { session: sessionStatus() });

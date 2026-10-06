@@ -298,10 +298,24 @@ function probeProxyPort(port, timeout) {
  * @returns {Promise<{port:number, url:string}|null>}
  */
 async function probeLocalProxy() {
-  const hits = await Promise.all(LOCAL_PROXY_PORTS.map((p) => probeProxyPort(p, 1500)));
-  const ports = hits.filter(Boolean).sort((a, b) => a - b);
-  if (!ports.length) return null;
-  return { port: ports[0], url: 'http://127.0.0.1:' + ports[0] };
+  /*
+   * 探测两轮：端口一旦在监听，第一轮基本就中；两轮是兜底 ——
+   * 实测代理刚启动/正在切节点时，单轮 1.5 秒会超时，
+   * 而**探测失败就退回直连**在墙内等于整个应用不可用（用户实测踩过：
+   * 一次探测超时 → 直连 → 满屏"DNS 解析失败"，而代理明明好好跑着）。
+   * 所以给两轮 + 更宽的 3 秒上限，并且把失败原因打出来，别再无声无息。
+   */
+  for (let round = 0; round < 2; round++) {
+    const hits = await Promise.all(LOCAL_PROXY_PORTS.map((p) => probeProxyPort(p, 3000)));
+    const ports = hits.filter(Boolean).sort((a, b) => a - b);
+    if (ports.length) return { port: ports[0], url: 'http://127.0.0.1:' + ports[0] };
+  }
+  console.log(
+    '[settings] 未配置代理，本机也没探测到可用代理（试过端口 ' +
+      LOCAL_PROXY_PORTS.join('/') +
+      '）—— 将直连；墙内直连 steamcommunity.com 会被 DNS 污染挡住'
+  );
+  return null;
 }
 
 /** 带端口探测的异步初始化（在 server 启动时调一次） */
@@ -365,6 +379,7 @@ module.exports = {
   DEFAULTS,
   loadSettings,
   initAsync,
+  probeLocalProxy,
   getConfig,
   patchConfig,
   saveSettings,

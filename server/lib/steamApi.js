@@ -576,6 +576,7 @@ async function appendToOrder(state, want, keyOf, ctx) {
 
   const target = want - state.need;
   let added = 0;
+  let anyOk = false;
 
   for (let round = 0; round < APPEND_MAX_ROUNDS && added < target; round++) {
     /*
@@ -590,6 +591,7 @@ async function appendToOrder(state, want, keyOf, ctx) {
     );
     const ok = res.filter((r) => r && r.ok);
     if (!ok.length) break;
+    anyOk = true;
 
     const routes = ok.map((r) => r.items || []);
     const fresh = [];
@@ -626,6 +628,17 @@ async function appendToOrder(state, want, keyOf, ctx) {
     const sum = ok.reduce((a, r) => Math.max(a, r.totalCount || 0), 0);
     if (sum) state.totalSum = sum;
     if (!fresh.length) break;   // 上游到头了，别再空转
+  }
+
+  /*
+   * 一条都没取到（上游全失败）→ **报失败，绝不能装作成功**。
+   *
+   * 旧写法不管取没取到都把 state.need 设成目标值，于是上层切出来是空数组，
+   * 而 buildResult 对"上游 ok + 空 items"返回 ok:true → 这个空页被缓存 60 秒。
+   * 用户看到的就是"某一页永久空白，点重新加载也一样"。
+   */
+  if (!anyOk) {
+    return { failed: '上游没有返回数据（这一页取不到），点重试再试一次' };
   }
 
   state.need = want;
@@ -752,7 +765,12 @@ async function queryWorkshop(params, ctx) {
     (common.excludedTags || []).slice().sort(),
   ]);
   const cached = mergeCacheGet(cacheKey);
-  if (cached) return Object.assign({}, cached, { cached: true });
+  if (cached) {
+    if (process.env.WW_DEBUG_PREFIX) {
+      console.log('[cache] 命中 page=' + cached.page + ' items=' + ((cached.items || []).length) + '  key=' + cacheKey.slice(0, 90));
+    }
+    return Object.assign({}, cached, { cached: true });
+  }
 
   /*
    * 冻结前缀的状态键：**故意不带 page / pageSize**。
@@ -878,16 +896,26 @@ async function queryWorkshop(params, ctx) {
     const from = baseStart;
     const slice = state.order.slice(from, from + pageSize);
     /*
-     * 自检：列表明明是空的，却报了个几百万的总数 —— 那一定是我们自己的 bug
-     * （切片位置超出了前缀长度）。用户看到的正是这种自相矛盾的界面：
-     * "共 575 万个作品" + "没有符合条件的作品"。留一条日志，别让它再无声发生。
+     * 自检：列表明明是空的，却报了个几百万的总数 —— 那一定是我们自己的问题
+     * （前缀没喂够 / 切片位置超出了前缀长度）。用户看到的正是这种自相矛盾的界面：
+     * "共 575 万个作品" + "没有符合条件的作品"。
+     *
+     * ⚠️ 关键：**按失败返回，不要当成功缓存**。
+     * buildResult 对"上游 ok + 空 items"返回 ok:true，一缓存就是 60 秒，
+     * 于是"重新加载"拿到的还是同一份空结果，页面卡死在空白上（用户实测踩过）。
      */
-    if (!slice.length && state.totalSum > 0) {
+    if (!slice.length && state.totalSum > 0 && from > 0) {
       console.log(
         '[prefix] ⚠️ 空页但总数不为 0：page=' + page + ' from=' + from +
           ' orderLen=' + state.order.length + ' need=' + state.need + ' cursor=' + state.cursor +
           ' totalSum=' + state.totalSum + '  ' + JSON.stringify(prefixKey).slice(0, 120)
       );
+      return {
+        ok: false,
+        retryable: true,
+        reason: '这一页没取到数据（上游没返回），点重试再试一次',
+        items: [],
+      };
     }
     if (process.env.WW_DEBUG_PREFIX) {
       console.log(
@@ -956,12 +984,18 @@ async function queryWorkshop(params, ctx) {
 
     const from = (page - 1) * pageSize;
     let mergedItems = state.order.slice(from, from + pageSize);
-    // 自检：切片为空但前缀里明明有东西 → 下标错位（同单选路径那条日志）
+    // 自检：切片为空但前缀里明明有东西 → 下标错位。同样**按失败返回，不缓存空页**
     if (!mergedItems.length && state.order.length && page > 1) {
       console.log(
         '[prefix] ⚠️ 多选路径空页：page=' + page + ' from=' + from +
           ' orderLen=' + state.order.length + ' need=' + state.need + ' cursor=' + state.cursor
       );
+      return {
+        ok: false,
+        retryable: true,
+        reason: '这一页没取到数据（上游没返回），点重试再试一次',
+        items: [],
+      };
     }
 
     // 复查：剔除没有命中全部多选类目的条目（与旧实现口径一致）
@@ -1796,10 +1830,16 @@ async function whoAmI(ctx) {
       steamId: jwt.steamId || '',
       expiresAt: jwt.exp || 0,
       expired: !!(jwt.exp && jwt.exp <= now),
+      /*
+       * 网络不通 ≠ 登录态失效。必须把这个区分带出去：
+       * 否则"代理挂了"会被上层当成"Cookie 失效"，顶栏显示"登录态失效"，
+       * 用户拿着明明能用的 Cookie 反复重贴也没用（用户实测踩过）。
+       */
+      networkError: !!r.networkError,
       reason: r.reason || '无法访问个人创意工坊页',
     };
   } catch (e) {
-    return { loggedIn: false, reason: '探测失败：' + e.message };
+    return { loggedIn: false, networkError: true, reason: '探测失败：' + e.message };
   }
 }
 

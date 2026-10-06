@@ -648,12 +648,19 @@ function makeLookup(host, proxy) {
           if (!f || !f.systemRaw.length) why = '系统 DNS 没有返回任何结果';
           else if (!f.probed.length) why = '解析结果全是已知的污染地址';
           else why = '解析结果既非已知污染地址，也无法建立可信的 TLS 连接（被阻断）';
-          return callback(
-            new Error(
-              'DNS 解析失败：' + hostname + ' 的' + why + '，已全部丢弃。' +
-                '请配置可用代理（设置 · 网络里的"出口"，或环境变量 WW_PROXY），否则无法连接该域名。'
-            )
+          /*
+           * 带上 code：调用方要靠它区分"被墙"和别的网络错误 ——
+           * 被墙是**可以自愈**的（现场探测本机代理再重试），
+           * 别的错误自愈没意义。用字符串匹配太脆，所以给个明确标记。
+           */
+          const err = new Error(
+            'DNS 解析失败：' + hostname + ' 的' + why + '，已全部丢弃。' +
+              '请配置可用代理（设置 · 网络里的"出口"，或环境变量 WW_PROXY），否则无法连接该域名。'
           );
+          err.code = 'EWW_DNS_BLOCKED';
+          err.dnsBlocked = true;
+          err.hostname = hostname;
+          return callback(err);
         }
         const wantV6 = options && options.family === 6;
         const filtered = addrs.filter((a) => (wantV6 ? a.includes(':') : !a.includes(':')));

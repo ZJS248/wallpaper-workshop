@@ -596,6 +596,62 @@ function summarizeSince(t0) {
  * 带限流与重试的 request 包装。所有上层调用都应该走这个。
  */
 async function requestLimited(url, options) {
+  try {
+    return await requestLimitedOnce(url, options);
+  } catch (e) {
+    /*
+     * 自愈：直连被墙 → 现场探测本机代理，改用代理重试一次。
+     *
+     * 为什么需要：出口代理是**启动时探测一次**决定的（见 settings.initAsync），
+     * 而那次探测只要超时（代理正在切节点、刚启动）就会退回直连 ——
+     * 墙内直连 steamcommunity.com 直接是"DNS 解析失败"，整个应用不可用，
+     * 而代理其实好好跑着。用户实测踩过：一次探测超时 → 之后所有请求全挂，
+     * 且**没有任何自愈路径**，只能重启碰运气。
+     *
+     * 现在：第一次撞到"被墙"就自己把代理找回来，并把配置热更新掉，
+     * 后面的请求自然走代理。只在"当前没配代理"时才做（用户明确配了代理就不越权改）。
+     */
+    if (e && e.dnsBlocked && !(options && options.proxy)) {
+      const healed = await healLocalProxy();
+      if (healed) {
+        return await requestLimitedOnce(url, Object.assign({}, options, { proxy: healed }));
+      }
+    }
+    throw e;
+  }
+}
+
+/** 一分钟内最多自愈一次，避免每次请求都去探测 */
+let healTriedAt = 0;
+let healing = null;
+
+async function healLocalProxy() {
+  if (Date.now() - healTriedAt < 60 * 1000) return '';
+  if (healing) return healing;
+  healTriedAt = Date.now();
+  healing = (async () => {
+    try {
+      // 延迟 require：settings 间接依赖本模块，顶层 require 会成环
+      const settings = require('./settings');
+      const found = await settings.probeLocalProxy();
+      if (!found) return '';
+      const cfg = settings.getConfig();
+      cfg.proxy = found.url;
+      cfg.proxySource = 'local-probe';
+      console.log('[proxy] 直连被阻断，自动改用本机代理 ' + found.url + ' 并重试这一发');
+      return found.url;
+    } catch (err) {
+      return '';
+    }
+  })();
+  try {
+    return await healing;
+  } finally {
+    healing = null;
+  }
+}
+
+async function requestLimitedOnce(url, options) {
   const opts = options || {};
   let host;
   try {
