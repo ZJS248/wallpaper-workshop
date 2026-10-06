@@ -94,6 +94,24 @@ function connectViaProxy(proxy, targetHost, targetPort, timeout) {
  * @returns {Promise<{status:number, headers:object, body:string, setCookies:string[], url:string, redirects:number}>}
  */
 async function rawRequest(url, options) {
+  try {
+    return await rawRequestOnce(url, options);
+  } catch (e) {
+    /*
+     * 自愈放在这一层（而不是 requestLimited），因为**错误会先被上层吃掉**：
+     * 比如 steamCommunity.fetchBrowse 会把异常包成 {ok:false, reason, networkError}，
+     * 于是 `dnsBlocked` 标记在中途就丢了，上层根本看不到"这是被墙"。
+     * 放在这里，"被墙 → 换代理重试"对**所有**调用方透明生效。
+     */
+    if (e && e.dnsBlocked && !(options && options.proxy)) {
+      const healed = await healLocalProxy();
+      if (healed) return await rawRequestOnce(url, Object.assign({}, options, { proxy: healed }));
+    }
+    throw e;
+  }
+}
+
+async function rawRequestOnce(url, options) {
   const opts = options || {};
   const maxRedirects = opts.maxRedirects === undefined ? 5 : opts.maxRedirects;
   const timeout = opts.timeout || DEFAULT_TIMEOUT;

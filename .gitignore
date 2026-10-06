@@ -26,3 +26,7 @@ config/settings.json
 # 本机启动入口（依赖本机路径，不通用）
 启动桌面版.cmd
 
+
+# 本地验证用（解包 asar / 测试实例的日志），不入库
+.verify-asar/
+.logtest/
