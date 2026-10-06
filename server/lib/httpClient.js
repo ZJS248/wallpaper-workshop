@@ -102,12 +102,27 @@ async function rawRequest(url, options) {
      * 比如 steamCommunity.fetchBrowse 会把异常包成 {ok:false, reason, networkError}，
      * 于是 `dnsBlocked` 标记在中途就丢了，上层根本看不到"这是被墙"。
      * 放在这里，"被墙 → 换代理重试"对**所有**调用方透明生效。
+     *
+     * ⚠️ 注意这里不是"拿到 healLocalProxy 的返回值才重试"：
+     * 代理可能**已经被另一个并发请求自愈好了**（自愈有 60 秒节流，
+     * 那种情况下 healLocalProxy 返回空串）。这时只要当前已经配上了代理，
+     * 就该用新代理重试 —— 否则首屏那几个并发请求会白报一次错。
      */
     if (e && e.dnsBlocked && !(options && options.proxy)) {
-      const healed = await healLocalProxy();
+      const healed = (await healLocalProxy()) || currentProxy();
       if (healed) return await rawRequestOnce(url, Object.assign({}, options, { proxy: healed }));
     }
     throw e;
+  }
+}
+
+/** 当前配置里生效的出口代理（可能已被自愈热更新过） */
+function currentProxy() {
+  try {
+    // 延迟 require：settings 间接依赖本模块，顶层 require 会成环
+    return require('./settings').getConfig().proxy || '';
+  } catch (err) {
+    return '';
   }
 }
 
@@ -644,8 +659,17 @@ let healTriedAt = 0;
 let healing = null;
 
 async function healLocalProxy() {
-  if (Date.now() - healTriedAt < 60 * 1000) return '';
+  /*
+   * ⚠️ 顺序很重要：**先看有没有探测在跑，再看节流**。
+   *
+   * 反过来写会有一个很难查的竞态：首屏是并发好几发请求，
+   * 第一个撞墙的请求设了 healTriedAt 并开始探测；第二个紧接着进来，
+   * 先撞上"60 秒内不再探测"直接拿到空串 —— 而此时 cfg.proxy 还没写好，
+   * 于是它**不重试就失败了**（实测：并发 3 发，2 发成功 1 发报 DNS 失败）。
+   * 先返回在跑的 promise，第二个请求就会等到探测结果，一起用上新代理。
+   */
   if (healing) return healing;
+  if (Date.now() - healTriedAt < 60 * 1000) return '';
   healTriedAt = Date.now();
   healing = (async () => {
     try {
