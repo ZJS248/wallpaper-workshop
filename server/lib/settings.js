@@ -166,17 +166,36 @@ function loadSettings() {
   // 环境变量覆盖（部署时最方便）
   if (process.env.WW_PORT) cfg.port = parseInt(process.env.WW_PORT, 10) || cfg.port;
   if (process.env.WW_HOST) cfg.host = process.env.WW_HOST;
-  if (process.env.WW_PROXY !== undefined) cfg.proxy = process.env.WW_PROXY;
   if (process.env.WW_COOKIE) cfg.cookie = process.env.WW_COOKIE;
   if (process.env.WW_REFRESH_TOKEN) cfg.refreshToken = process.env.WW_REFRESH_TOKEN;
   if (process.env.WW_STEAM_API_KEY) cfg.apiKey = process.env.WW_STEAM_API_KEY;
 
+  /*
+   * 出口代理：WW_PROXY > 已保存的配置 > 系统代理环境变量 > 父项目 > dsh > 本机端口探测
+   *
+   * ⚠️ 这里踩过一个**很贵的坑**（用户实测：整个应用不可用，满屏"DNS 解析失败"）。
+   *
+   * 旧写法：`wwProxyExplicit = process.env.WW_PROXY !== undefined`，
+   * 也就是 **WW_PROXY 只要"存在"，哪怕是空串，就算用户明确表态**，
+   * 于是 initAsync 里那段"探测本机代理"被整段跳过 → 永久直连 →
+   * 墙内直连 steamcommunity.com 直接死，而 Clash 明明在 7890 跑着。
+   * 更麻烦的是：这个环境变量**不是用户设的**，是启动环境里带进来的噪声，
+   * 用户根本不知道自己"表态"过。
+   *
+   * 现在的语义（空串 = 没设，不再是"我要直连"）：
+   *   WW_PROXY 未设 / 空串      → 自动（系统代理 → 父项目 → dsh → 探测本机端口）
+   *   WW_PROXY=direct|none|off  → 强制直连，并且**跳过**本机探测（真正的"我要直连"）
+   *   WW_PROXY=http://…         → 用它
+   */
+  const wwRaw = process.env.WW_PROXY;
+  const wwVal = wwRaw === undefined ? '' : String(wwRaw).trim();
+  const wwSet = wwVal !== '';
+  const wwWantDirect = wwSet && /^(direct|none|off|0)$/i.test(wwVal);
+  if (wwSet && !wwWantDirect) cfg.proxy = wwVal;
+  else if (wwWantDirect) cfg.proxy = '';
+
   // 代理：显式配置 > 环境变量 > 父项目 > dsh 代理配置
-  //
-  // ⚠️ WW_PROXY 一旦出现（哪怕是空串）就以它为准。
-  // 旧实现只看 `if (!cfg.proxy)`，于是 `WW_PROXY=` 这种"我要直连"的明确表态
-  // 会被后面的自动探测覆盖掉 —— 用户说直连，程序却偷偷捡了个代理。
-  const wwProxyExplicit = process.env.WW_PROXY !== undefined;
+  const wwProxyExplicit = wwWantDirect;
 
   if (!cfg.proxy) {
     const envProxy = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY;
@@ -340,6 +359,29 @@ async function initAsync() {
       console.log('[settings] 未配置代理，但探测到本机代理 ' + found.url + '，已自动启用');
     }
   }
+
+  /*
+   * 把"出口是怎么定的"整条依据打出来。
+   *
+   * 为什么值得单独记：用户报"应用连不上、浏览器却好好的"时，
+   * 第一个要回答的就是"它到底走了哪条路"。以前只有一行 `代理 : xxx 来源: yyy`，
+   * 看不出**为什么**是这个结果（是环境变量？是配置？还是探测失败？），
+   * 排查全靠猜。
+   */
+  let savedProxyNote = '(无)';
+  try {
+    const raw = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
+    if (Object.prototype.hasOwnProperty.call(raw, 'proxy')) savedProxyNote = JSON.stringify(raw.proxy);
+  } catch (e) {
+    /* 读不到就算了 */
+  }
+  console.log(
+    '[settings] 出口决策：' +
+      'WW_PROXY=' + (process.env.WW_PROXY === undefined ? '(未设)' : JSON.stringify(process.env.WW_PROXY)) +
+      '  HTTPS_PROXY=' + (process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || '(未设)') +
+      '  配置文件里的 proxy=' + savedProxyNote +
+      '  → 采用 ' + (cfg.proxy || '(直连)') + '（来源 ' + (cfg.proxySource || 'direct') + '）'
+  );
 
   _cache = cfg;
   return cfg;

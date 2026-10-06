@@ -367,6 +367,7 @@ function refreshPrefixIfStale(state, page) {
   state.order = [];
   state.need = 0;
   state.cursor = 0;
+  state.exhausted = false;
   state.at = Date.now();
 }
 
@@ -410,6 +411,7 @@ function mergeStateGet(key) {  const hit = MERGE_STATES.get(key);
     order: [],           // 归并后的有序列表
     busy: null,          // 正在扩展时的 Promise（串行化用，见 buildMergeOrder）
     at: Date.now(),      // 上次变动时间（用来判断"回到第 1 页该不该重建"）
+    exhausted: false,    // 上游确实到头了（再补也补不出新条目），别再空转
     totalSum: 0,
     requests: 0,
     upstreamPages: 0,
@@ -487,7 +489,7 @@ async function buildMergeOrder(state, need, keyOf, ctx) {
    * 串行之后，第二个请求进来会先等第一个跑完，再基于新的 need 决定要不要继续。
    */
   for (;;) {
-    if (state.need >= want && state.order.length) return state;
+    if ((state.need >= want || state.exhausted) && state.order.length) return state;
     if (!state.busy) break;
     await state.busy.catch(function () {});
   }
@@ -498,9 +500,19 @@ async function buildMergeOrder(state, need, keyOf, ctx) {
   });
   try {
     // 等锁期间可能已经被别的请求喂饱了
-    if (state.need >= want && state.order.length) return state;
+    if ((state.need >= want || state.exhausted) && state.order.length) return state;
     if (state.order.length) return await appendToOrder(state, want, keyOf, ctx);
-    return await initialBuildOrder(state, want, keyOf, ctx);
+
+    const built = await initialBuildOrder(state, want, keyOf, ctx);
+    if (built && built.failed) return built;
+    /*
+     * 首次构建没取满（上游有一页失败/超时）→ **立刻接着补**，别把短页直接交给用户。
+     * 用户实测：每页 60 条，第一页只有 31 条 —— 就是首次构建少了一页就返回了。
+     */
+    if (state.order.length < want && !state.exhausted) {
+      return await appendToOrder(state, want, keyOf, ctx);
+    }
+    return built;
   } finally {
     state.busy = null;
     release();
@@ -537,6 +549,13 @@ async function initialBuildOrder(state, want, keyOf, ctx) {
   state.need = want;
   state.cursor = want;
   state.at = Date.now();
+  /*
+   * 只取到 want 条里的一部分（上游页有失败的）→ **别把 need 记成"已就绪"**。
+   * 记成 want 的话，`state.need >= want` 会让后续请求直接命中这份短列表，
+   * 于是这一页**一直短**（用户实测：每页 60 条，第一页只有 31 条）。
+   * 记成实际长度，下一次请求就会接着往后补。
+   */
+  if (state.order.length < want) state.need = state.order.length;
   state.requests += ok.length;
   state.upstreamPages += ok.reduce((a, r) => a + (r.upstreamPages || 0), 0);
   state.totalSum = ok.reduce((a, r) => Math.max(a, r.totalCount || 0), 0);
@@ -627,7 +646,10 @@ async function appendToOrder(state, want, keyOf, ctx) {
     state.upstreamPages += ok.reduce((a, r) => a + (r.upstreamPages || 0), 0);
     const sum = ok.reduce((a, r) => Math.max(a, r.totalCount || 0), 0);
     if (sum) state.totalSum = sum;
-    if (!fresh.length) break;   // 上游到头了，别再空转
+    if (!fresh.length) {
+      state.exhausted = true; // 上游到头了，别再空转
+      break;
+    }
   }
 
   /*
@@ -642,6 +664,8 @@ async function appendToOrder(state, want, keyOf, ctx) {
   }
 
   state.need = want;
+  // 同 initialBuildOrder：没补够就别记成"已就绪"，留给下一次继续补
+  if (state.order.length < want) state.need = state.order.length;
   state.at = Date.now();
   return state;
 }
