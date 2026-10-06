@@ -190,6 +190,40 @@ TAG_GROUPS.forEach((g) => {
   if (g.subgroups && !g.tags) g.tags = g.subgroups.reduce((acc, s) => acc.concat(s.tags), []);
 });
 
+/** 标签 → 它所属的组 key。用来把客户端送来的"混合组"按官方归属重新分桶 */
+const TAG_GROUP_OF = {};
+TAG_GROUPS.forEach((g) => {
+  (g.tags || []).forEach((t) => {
+    if (TAG_GROUP_OF[t] === undefined) TAG_GROUP_OF[t] = g.key;
+  });
+});
+
+/**
+ * 把客户端送来的每个"组"按**官方归属**重新分桶。
+ *
+ * 为什么需要：客户端可能存着**旧结构**的筛选（用户本地 localStorage 是持久化的）。
+ * 1.0.16 把「常规壁纸/预设」从 type 组挪到了新的 category 组，而用户存的还是
+ * `type: ['Scene','Web','Wallpaper','Preset']`。type 组是"组内 OR"，
+ * 于是带 Wallpaper 标签的视频壁纸照样通过 —— 用户报"没选视频却出现视频"。
+ *
+ * 这里不需要客户端告诉我们它想表达哪个组：标签的归属是官方定义死的，
+ * 按归属拆开就对了。认不出的标签（Steam 新增而我们还没收录）原样保留成独立一组，
+ * 不改变既有行为。
+ */
+function regroupByOfficialGroups(groups) {
+  const out = [];
+  for (const g of groups || []) {
+    const buckets = new Map();
+    for (const t of g || []) {
+      const key = TAG_GROUP_OF[t] || ('__unknown__:' + t);
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key).push(t);
+    }
+    buckets.forEach((vals) => out.push(vals));
+  }
+  return out;
+}
+
 /** 所有"合法的"筛选值（组内全集），用来判断"某组是否等于没筛" */
 function allTagsOfGroupKey(key) {
   const g = TAG_GROUPS.find((x) => x.key === key);
@@ -368,6 +402,7 @@ function refreshPrefixIfStale(state, page) {
   state.need = 0;
   state.cursor = 0;
   state.exhausted = false;
+  state.pageStart = {};   // 前缀重建了，每页的扫描起点作废
   state.at = Date.now();
 }
 
@@ -412,6 +447,7 @@ function mergeStateGet(key) {  const hit = MERGE_STATES.get(key);
     busy: null,          // 正在扩展时的 Promise（串行化用，见 buildMergeOrder）
     at: Date.now(),      // 上次变动时间（用来判断"回到第 1 页该不该重建"）
     exhausted: false,    // 上游确实到头了（再补也补不出新条目），别再空转
+    pageStart: {},       // 多选路径：每页在 order 里的扫描起点（见那里的说明）
     totalSum: 0,
     requests: 0,
     upstreamPages: 0,
@@ -740,7 +776,9 @@ async function queryWorkshop(params, ctx) {
    * 但不识别的话会按"组内 OR"拆成 N 路请求（标签组全选就是 25 路），
    * 又慢又容易被上游限流 —— 用户看到的"查询条件太长"就有这一份。
    */
-  const groupsIn = (params.orGroups || []).map((g) => (g || []).filter(Boolean)).filter((g) => g.length);
+  const groupsRaw = (params.orGroups || []).map((g) => (g || []).filter(Boolean)).filter((g) => g.length);
+  // 先按官方归属重新分桶：客户端可能存着旧结构（见 regroupByOfficialGroups）
+  const groupsIn = regroupByOfficialGroups(groupsRaw);
   const rawGroups = groupsIn.filter((g) => !isFullGroupSelection(g));
   const droppedFullGroups = groupsIn.length - rawGroups.length;
 
@@ -998,20 +1036,56 @@ async function queryWorkshop(params, ctx) {
     // 之前也是每页各建一份，同一个"前缀不是同一份数据"的毛病。
     const state = mergeStateGet('P:' + prefixKey);
     refreshPrefixIfStale(state, page);
-    const res = await buildMergeOrder(state, needPerRoute, keyOf, { values, andTagsAll, runQuery });
-    if (res && res.failed) {
-      return { ok: false, reason: res.failed, items: [] };
-    }
-    if (!state.order.length) {
-      return { ok: false, reason: '合并查询全部失败', items: [] };
-    }
+    /*
+     * 多选类目这条路径要"过一遍复查"（每条都必须命中**每个**多选组），
+     * 所以**不能**按固定下标切一页就完事 —— 复查会剔掉一批，
+     * 结果就是 60 条切成 32 条（用户实测："每页 60 条，第一页只有 31 个"）。
+     *
+     * 做法：记一份**每页的扫描起点**，从起点往后扫，直到凑够 pageSize 条
+     * 通过复查的条目为止；起点自然就定下了下一页从哪儿开始。
+     * 这样既补满了一页，又不会和上一页重叠（不会出现"前面看过的"）。
+     */
+    if (!state.pageStart) state.pageStart = {};
+    let need = needPerRoute;
+    let mergedItems = [];
+    let before = 0;
+    let scanEnd = (page - 1) * pageSize;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const res = await buildMergeOrder(state, need, keyOf, { values, andTagsAll, runQuery });
+      if (res && res.failed) {
+        return { ok: false, reason: res.failed, items: [] };
+      }
+      if (!state.order.length) {
+        return { ok: false, reason: '合并查询全部失败', items: [] };
+      }
 
-    const from = (page - 1) * pageSize;
-    let mergedItems = state.order.slice(from, from + pageSize);
-    // 自检：切片为空但前缀里明明有东西 → 下标错位。同样**按失败返回，不缓存空页**
-    if (!mergedItems.length && state.order.length && page > 1) {
+      const start = state.pageStart[page] !== undefined ? state.pageStart[page] : (page - 1) * pageSize;
+      const picked = [];
+      let scan = start;
+      while (picked.length < pageSize && scan < state.order.length) {
+        const chunk = state.order.slice(scan, scan + Math.max(pageSize * 2, 60));
+        if (!chunk.length) break;
+        scan += chunk.length;
+        for (const it of chunk) {
+          if (picked.length >= pageSize) break;
+          if (hitsGroups(it)) picked.push(it);
+        }
+      }
+      mergedItems = picked;
+      before = state.order.slice(start, scan).length;
+      scanEnd = scan;
+      // 够一页，或者上游确实到头了 → 收工；否则把前缀扩得更大再扫一遍
+      if (mergedItems.length >= pageSize || state.exhausted) break;
+      const bigger = Math.min(Math.max(need * 2, need + pageSize * 2), MERGE_PREFIX_MAX_ITEMS);
+      if (bigger <= need) break;
+      need = bigger;
+    }
+    state.pageStart[page + 1] = scanEnd;
+
+    // 自检：扫描区间为空但前缀里明明有东西 → 下标错位。同样**按失败返回，不缓存空页**
+    if (!mergedItems.length && state.order.length && page > 1 && state.pageStart[page] === undefined) {
       console.log(
-        '[prefix] ⚠️ 多选路径空页：page=' + page + ' from=' + from +
+        '[prefix] ⚠️ 多选路径空页：page=' + page +
           ' orderLen=' + state.order.length + ' need=' + state.need + ' cursor=' + state.cursor
       );
       return {
@@ -1022,9 +1096,7 @@ async function queryWorkshop(params, ctx) {
       };
     }
 
-    // 复查：剔除没有命中全部多选类目的条目（与旧实现口径一致）
-    const before = mergedItems.length;
-    mergedItems = mergedItems.filter(hitsGroups);
+    // 复查已经在上面的扫描里做过了（hitsGroups），这里不再重复剔
 
     const multiGroup = rawGroups.filter((g) => g.length > 1).length > 1;
     const totalSum = state.totalSum;

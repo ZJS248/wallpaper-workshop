@@ -871,21 +871,58 @@ new Vue({
       }
     },
 
-    /** 把本地存下来的筛选值里"已经不存在的标签"裁掉（Steam 改过标签表就要靠它兜底） */
+    /**
+     * 把本地存下来的筛选值里"已经不存在 / 不属于这一组"的标签裁掉。
+     *
+     * ⚠️ 旧实现只判断"这个标签是否存在于**任意**分组"（一个扁平 Set），
+     * 于是**标签换组**的情况完全兜不住：1.0.16 把「常规壁纸/预设」从
+     * type 组挪到了新的 category 组，而用户本地存的还是
+     * `type: ['Scene','Web','Wallpaper','Preset']` —— 四个值都"存在"，一个都没裁掉，
+     * 于是继续以 type 组的身份发出去（组内 OR），
+     * 带 Wallpaper 标签的视频壁纸照样通过 → 用户报"没选视频却出现视频"。
+     *
+     * 现在按**归属组**校验：值必须属于它所在的那个组；
+     * 如果它属于**别的**组，就**迁移过去**（而不是丢掉）—— 用户的选择意图要保住。
+     */
     pruneSavedFilters() {
       const groups = (this.meta && this.meta.groups) || [];
       if (!groups.length) return;
-      const known = new Set(groups.reduce((acc, g) => acc.concat(g.tags || []), []));
+      /** 标签 → 它所属的组 key（同一标签只会在一个组里） */
+      const ownerOf = {};
+      groups.forEach((g) => {
+        (g.tags || []).forEach((t) => {
+          if (ownerOf[t] === undefined) ownerOf[t] = g.key;
+        });
+      });
       const next = {};
       let changed = false;
+      const push = (k, t) => {
+        if (!next[k]) next[k] = [];
+        if (next[k].indexOf(t) < 0) next[k].push(t);
+      };
       Object.keys(this.filters.tagGroups || {}).forEach((k) => {
-        const vals = (this.filters.tagGroups[k] || []).filter((t) => known.has(t));
-        if (vals.length) next[k] = vals;
-        if (vals.length !== (this.filters.tagGroups[k] || []).length) changed = true;
+        const vals = this.filters.tagGroups[k] || [];
+        vals.forEach((t) => {
+          const owner = ownerOf[t];
+          if (owner === undefined) return; // 标签已不存在 → 丢掉
+          if (owner === k) push(k, t);
+          else {
+            // 换组了（如 Wallpaper 从 type 挪到 category）→ 跟着搬过去
+            push(owner, t);
+            changed = true;
+          }
+        });
       });
-      const exclude = (this.filters.exclude || []).filter((t) => known.has(t) || t === 'Mature');
+      // 顺序/数量对不上就认为变了（迁移会改结构，上面已置 changed）
+      const beforeKeys = Object.keys(this.filters.tagGroups || {}).sort().join(',');
+      const afterKeys = Object.keys(next).sort().join(',');
+      if (beforeKeys !== afterKeys) changed = true;
+      const exclude = (this.filters.exclude || []).filter((t) => ownerOf[t] !== undefined || t === 'Mature');
       if (exclude.length !== (this.filters.exclude || []).length) changed = true;
       if (changed) {
+        if (window.WLog) {
+          WLog.info('[filters] 清洗本地筛选：' + JSON.stringify(this.filters.tagGroups) + ' → ' + JSON.stringify(next));
+        }
         this.filters = Object.assign({}, this.filters, { tagGroups: next, exclude: exclude });
       }
     },
